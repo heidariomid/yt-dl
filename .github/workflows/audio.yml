@@ -1,0 +1,208 @@
+name: Audio Youtube Videos Downloader
+run-name: "Download → ${{ inputs.youtube_url }}"
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: "YouTube video URL"
+        required: true
+        type: string
+      password:
+        description: "Password for zip files (optional)"
+        required: false
+        default: ""
+        type: string
+
+# concurrency:
+#   group: main-uploads
+#   cancel-in-progress: false
+
+jobs:
+  download-audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Configure Git
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global core.compression 0
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+      - name: Start WARP
+        run: |
+          docker network create warp-net || true
+          docker run -d \
+            --name warp \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            caomingjun/warp
+          sleep 25
+
+      - name: Setup tools (FAST)
+        run: |
+          sudo apt-get install -y -qq ffmpeg
+          python3 -m pip install --user -U yt-dlp
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Download YouTube Audio
+        run: |
+          URL="${{ github.event.inputs.youtube_url }}"
+          ZIP_PASSWORD="${{ github.event.inputs.password }}"
+
+          SPLIT_MB=45
+          SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
+
+          BACKUP_DIR="/tmp/audio_backup_$$"
+          mkdir -p "$BACKUP_DIR"
+          echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
+
+          mkdir -p sound tmp_downloads
+
+          echo "Downloading audio..."
+
+          yt-dlp \
+            --proxy "socks5://127.0.0.1:1080" \
+            -f "bestaudio[ext=m4a]/bestaudio" \
+            --output "tmp_downloads/%(title)s.%(ext)s" \
+            --no-playlist \
+            --retries 10 \
+            "$URL"
+
+          echo "Download complete"
+          ls -la tmp_downloads/
+
+          FILE_INDEX=0
+          for FILE in tmp_downloads/*; do
+            [ -f "$FILE" ] || continue
+            SIZE=$(stat -c%s "$FILE")
+            BASENAME=$(basename "$FILE")
+            FILENAME_NO_EXT="${BASENAME%.*}"
+            EXT="${BASENAME##*.}"
+            FILE_INDEX=$((FILE_INDEX + 1))
+
+            echo "Processing: $BASENAME ($(( SIZE / 1024 / 1024 ))MB)"
+
+            FINAL_FOLDER_NAME="$FILENAME_NO_EXT"
+            mkdir -p "$BACKUP_DIR/${FINAL_FOLDER_NAME}"
+
+            TEMP_NAME="audio_${FILE_INDEX}"
+
+            if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
+              echo "Splitting..."
+
+              cp "$FILE" "tmp_downloads/${TEMP_NAME}.${EXT}"
+
+              cd tmp_downloads
+              if [ -n "$ZIP_PASSWORD" ]; then
+                zip -0 -s "${SPLIT_MB}m" -P "$ZIP_PASSWORD" "${TEMP_NAME}.zip" "${TEMP_NAME}.${EXT}"
+              else
+                zip -0 -s "${SPLIT_MB}m" "${TEMP_NAME}.zip" "${TEMP_NAME}.${EXT}"
+              fi
+
+              echo "Zip output:"
+              ls -la
+
+              for part in ${TEMP_NAME}.z[0-9]* ${TEMP_NAME}.zip; do
+                if [ -f "$part" ]; then
+                  PART_EXT="${part##*.}"
+                  mv "$part" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.${PART_EXT}"
+                fi
+              done
+
+              rm -f "${TEMP_NAME}.${EXT}"
+              cd ..
+
+            else
+              if [ -n "$ZIP_PASSWORD" ]; then
+                zip -j -P "$ZIP_PASSWORD" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.zip" "$FILE"
+              else
+                cp "$FILE" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.${EXT}"
+              fi
+            fi
+          done
+
+      # - name: Push Files
+      #   run: |
+      #     git config user.name "github-actions"
+      #     git config user.email "github-actions@github.com"
+
+      #     BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
+
+      #     mkdir -p sound
+
+      #     cp -r "$BACKUP_DIR"/* sound/ 2>/dev/null || true
+
+      #     git add sound/
+
+      #     git commit -m "🎧 Add audio files" || echo "No changes"
+
+      #     git pull origin main --rebase || true
+
+      #     git push origin HEAD:main
+
+      - name: push sound test
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
+
+          FILE_COUNT=$(find "$BACKUP_DIR" -type f | wc -l)
+
+          echo "Files found: $FILE_COUNT"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "No files found!"
+            exit 1
+          fi
+
+          # Sync latest remote changes
+          git pull --rebase origin "$BRANCH" || true
+
+          # Copy files
+          mkdir -p sound
+          cp -r "$BACKUP_DIR"/* sound/
+
+          # Add files
+          git add sound/
+
+          # Commit
+          git commit -m "Add downloaded files [skip ci]" || true
+
+          # Push with small retry
+          for i in 1 2 3 4 5; do
+            echo "Push attempt $i..."
+
+            if git push origin HEAD:"$BRANCH"; then
+              echo "Push successful!"
+              exit 0
+            fi
+
+            echo "Push failed. Syncing and retrying..."
+
+            git pull --rebase origin "$BRANCH" || true
+
+            sleep 3
+          done
+
+          echo "Push failed after retries"
+          exit 1
+
+      - name: Stop WARP
+        if: always()
+        run: |
+          docker stop warp || true
+          docker rm warp || true
