@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x /Users/omid/Developer/Github/yt-dl/download.sh)",
+      "Bash(warp-cli disconnect *)",
+      "Bash(warp-cli mode *)",
+      "Bash(chmod +x /Users/omid/Developer/Github/yt-dl/server.py)",
+      "Bash(echo \"=== proxy cores ===\"; which sing-box xray v2ray mihomo clash hiddify-cli 2>/dev/null *)",
+      "Read(//Applications/**)",
+      "Bash(ruby -ryaml -e \"YAML.load_file\\('.github/workflows/batch-fix.yml'\\); puts 'YAML OK'\")"
+    ]
+  }
+}
