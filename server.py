@@ -9,6 +9,7 @@ import http.server
 import json
 import os
 import subprocess
+import threading
 from socketserver import ThreadingMixIn
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,6 +17,10 @@ DOWNLOAD_SCRIPT = os.path.join(SCRIPT_DIR, 'download.sh')
 LINKS_FILE = os.path.join(SCRIPT_DIR, 'links.txt')
 OUTPUT_DIR = os.path.expanduser('~/Downloads/yt-dl')
 PORT = 9876
+
+_active_proc: subprocess.Popen | None = None
+_cancel_flag = threading.Event()
+_proc_lock = threading.Lock()
 
 
 def read_links_file():
@@ -77,6 +82,12 @@ HTML = r"""<!DOCTYPE html>
   }
   #open-btn.visible { display: block }
   #open-btn:hover { color: #aaa; border-color: #444 }
+  #cancel-btn {
+    flex: none; background: transparent; color: #eb5757; border: 1px solid #eb575744;
+    padding: 10px 14px; font-weight: 400; display: none;
+  }
+  #cancel-btn.visible { display: block }
+  #cancel-btn:hover:not(:disabled) { background: #eb575714; border-color: #eb5757 }
   .log {
     margin-top: 20px; background: #181818; border: 1px solid #222;
     border-radius: 6px; padding: 14px 16px; height: 340px;
@@ -110,16 +121,18 @@ HTML = r"""<!DOCTYPE html>
       <option value="audio">Audio MP3</option>
     </select>
     <button id="dl-btn" onclick="startDownload()">Download</button>
+    <button id="cancel-btn" onclick="cancelDownload()">Cancel</button>
     <button id="open-btn" onclick="openFolder()">Open folder</button>
   </div>
 </div>
 <div class="log" id="log"></div>
 
 <script>
-const log   = document.getElementById('log');
-const btn   = document.getElementById('dl-btn');
-const openB = document.getElementById('open-btn');
-const badge = document.getElementById('badge');
+const log      = document.getElementById('log');
+const btn      = document.getElementById('dl-btn');
+const cancelB  = document.getElementById('cancel-btn');
+const openB    = document.getElementById('open-btn');
+const badge    = document.getElementById('badge');
 const textarea = document.getElementById('urls');
 
 // Load links.txt on page open
@@ -159,6 +172,8 @@ function startDownload() {
   log.innerHTML = '';
   log.classList.add('visible');
   btn.disabled = true;
+  cancelB.classList.add('visible');
+  cancelB.disabled = false;
   openB.classList.remove('visible');
   badge.classList.remove('visible');
 
@@ -173,7 +188,7 @@ function startDownload() {
 
     function read() {
       reader.read().then(({ done, value }) => {
-        if (done) { btn.disabled = false; return; }
+        if (done) { btn.disabled = false; cancelB.classList.remove('visible'); return; }
         buf += dec.decode(value, { stream: true });
         const parts = buf.split('\n\n');
         buf = parts.pop();
@@ -189,9 +204,14 @@ function startDownload() {
               appendLine(`✓  done`, 'done');
             } else if (ev.type === 'failed') {
               appendLine(`✗  failed`, 'failed');
+            } else if (ev.type === 'cancelled') {
+              appendLine('⊘  cancelled', 'failed');
+              btn.disabled = false;
+              cancelB.classList.remove('visible');
             } else if (ev.type === 'all_done') {
               appendLine('─── all downloads finished ───', 'info');
               btn.disabled = false;
+              cancelB.classList.remove('visible');
               openB.classList.add('visible');
               if (ev.failed_count > 0) {
                 // Reload links.txt — server wrote failed URLs back
@@ -216,7 +236,13 @@ function startDownload() {
   }).catch(err => {
     appendLine('Error: ' + err.message, 'failed');
     btn.disabled = false;
+    cancelB.classList.remove('visible');
   });
+}
+
+function cancelDownload() {
+  cancelB.disabled = true;
+  fetch('/cancel', { method: 'POST' });
 }
 
 function openFolder() {
@@ -255,9 +281,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        global _active_proc, _cancel_flag
         if self.path == '/open-folder':
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             subprocess.Popen(['open', OUTPUT_DIR])
+            self.send_response(204)
+            self.end_headers()
+            return
+
+        if self.path == '/cancel':
+            _cancel_flag.set()
+            with _proc_lock:
+                if _active_proc and _active_proc.poll() is None:
+                    _active_proc.terminate()
             self.send_response(204)
             self.end_headers()
             return
@@ -286,10 +322,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pass
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+        _cancel_flag.clear()
 
         failed_urls = []
+        cancelled = False
 
         for i, url in enumerate(urls):
+            if _cancel_flag.is_set():
+                cancelled = True
+                break
             send({'type': 'start', 'url': url, 'index': i + 1, 'total': len(urls)})
             try:
                 proc = subprocess.Popen(
@@ -299,9 +340,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     text=True,
                     env={**os.environ, 'TERM': 'dumb'},
                 )
+                with _proc_lock:
+                    _active_proc = proc
                 for line in proc.stdout:
+                    if _cancel_flag.is_set():
+                        proc.terminate()
+                        break
                     send({'type': 'log', 'text': line.rstrip()})
                 proc.wait()
+                with _proc_lock:
+                    _active_proc = None
+                if _cancel_flag.is_set():
+                    cancelled = True
+                    break
                 if proc.returncode == 0:
                     send({'type': 'done', 'url': url})
                 else:
@@ -310,6 +361,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 failed_urls.append(url)
                 send({'type': 'failed', 'url': url, 'text': str(e)})
+
+        if cancelled:
+            send({'type': 'cancelled'})
+            return
 
         # Write back only failed URLs; clear file if all succeeded
         with open(LINKS_FILE, 'w') as f:
