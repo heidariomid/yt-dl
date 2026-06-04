@@ -8,7 +8,8 @@
       "Bash(echo \"=== proxy cores ===\"; which sing-box xray v2ray mihomo clash hiddify-cli 2>/dev/null *)",
       "Read(//Applications/**)",
       "Bash(ruby -ryaml -e \"YAML.load_file\\('.github/workflows/batch-fix.yml'\\); puts 'YAML OK'\")",
-      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/omid/Developer/Github/yt-dl/server.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/omid/Developer/Github/yt-dl/server.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "mcp__claude_ai_Notion__notion-create-pages"
     ]
   }
 }

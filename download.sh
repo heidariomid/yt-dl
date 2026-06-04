@@ -77,6 +77,7 @@ if [ "$QUALITY" = "audio" ]; then
     --retries 10 \
     --fragment-retries 10 \
     --no-check-certificates \
+    --continue \
     "$URL"
   echo ""
   echo "Done! Saved to: $OUTPUT_DIR"
@@ -95,6 +96,7 @@ download_video() {
         --no-playlist --retries 10 --fragment-retries 10 \
         --concurrent-fragments 4 --no-check-certificates \
         --sleep-requests 2 --sleep-interval 1 --max-sleep-interval 5 \
+        --continue \
         "$URL" ;;
     2)
       yt-dlp $PROXY_ARGS \
@@ -103,6 +105,7 @@ download_video() {
         --no-playlist --retries 10 --fragment-retries 10 \
         --user-agent "Mozilla/5.0 (Linux; Android 12; SM-S906N Build/QP1A.190711.020) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36" \
         --extractor-args "youtube:player_client=android" \
+        --continue \
         "$URL" ;;
     3)
       yt-dlp $PROXY_ARGS \
@@ -111,6 +114,7 @@ download_video() {
         --no-playlist --retries 10 --fragment-retries 10 \
         --user-agent "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1" \
         --extractor-args "youtube:player_client=ios" \
+        --continue \
         "$URL" ;;
     4)
       yt-dlp $PROXY_ARGS \
@@ -118,6 +122,7 @@ download_video() {
         --output "$OUTPUT_DIR/%(title)s.%(ext)s" \
         --no-playlist --retries 10 --fragment-retries 10 \
         --extractor-args "youtube:player_client=tv_embedded" \
+        --continue \
         "$URL" ;;
   esac
 }
