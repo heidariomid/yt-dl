@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from socketserver import ThreadingMixIn
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,94 +41,294 @@ HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>YT-DL</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0 }
-  body {
-    background: #111; color: #e0e0e0;
-    font: 14px/1.6 'SF Mono', ui-monospace, monospace;
-    padding: 40px 32px; max-width: 700px;
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
+
+  :root {
+    --bg:         #0a0a0a;
+    --bg-card:    #161616;
+    --bg-input:   #1a1a1a;
+    --bg-tabs:    #0f0f0f;
+    --bg-tab-act: #252525;
+    --border:     #2a2a2a;
+    --border-focus: #444;
+    --text:       #d0d0d0;
+    --text-strong:#f0f0f0;
+    --text-head:  #fff;
+    --text-dim:   #666;
+    --text-muted: #333;
+    --placeholder:#3a3a3a;
+    --shadow:     0 24px 64px #00000080;
+    --btn-dis-bg: #1e1e1e;
+    --btn-dis-fg: #444;
+    --log-thumb:  #2e2e2e;
+    --log-dim:    #555;
   }
-  .header { display: flex; align-items: center; gap: 12px; margin-bottom: 28px }
-  h1 { font-size: 16px; font-weight: 500; color: #fff; letter-spacing: .04em }
+  .light {
+    --bg:         #f5f5f5;
+    --bg-card:    #fff;
+    --bg-input:   #fafafa;
+    --bg-tabs:    #efefef;
+    --bg-tab-act: #fff;
+    --border:     #e0e0e0;
+    --border-focus:#bbb;
+    --text:       #444;
+    --text-strong:#111;
+    --text-head:  #0a0a0a;
+    --text-dim:   #aaa;
+    --text-muted: #ccc;
+    --placeholder:#ccc;
+    --shadow:     0 24px 64px #00000018;
+    --btn-dis-bg: #e8e8e8;
+    --btn-dis-fg: #aaa;
+    --log-thumb:  #ddd;
+    --log-dim:    #bbb;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.6 -apple-system, 'Inter', 'SF Pro Display', system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    transition: background .2s, color .2s;
+  }
+
+  /* ── Theme toggle ── */
+  .theme-toggle {
+    position: fixed; top: 18px; right: 18px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    color: var(--text-dim); width: 36px; height: 36px;
+    border-radius: 10px; cursor: pointer; font-size: 16px;
+    display: flex; align-items: center; justify-content: center;
+    transition: all .15s; z-index: 10;
+  }
+  .theme-toggle:hover { color: var(--text-strong); border-color: var(--border-focus) }
+
+  /* ── Logo / hero ── */
+  .hero {
+    text-align: center;
+    margin-bottom: 40px;
+    user-select: none;
+  }
+  .logo {
+    width: 52px; height: 52px;
+    background: var(--text-head);
+    border-radius: 14px;
+    display: inline-flex; align-items: center; justify-content: center;
+    margin-bottom: 16px;
+    box-shadow: 0 0 0 1px #ffffff10, 0 8px 32px #00000060;
+  }
+  .logo svg { width: 26px; height: 26px }
+  .hero h1 {
+    font-size: 22px; font-weight: 600; color: var(--text-head);
+    letter-spacing: -.02em; margin-bottom: 6px;
+  }
+  .hero p { font-size: 13px; color: var(--text-dim); letter-spacing: .01em }
+
+  /* ── Card ── */
+  .card {
+    width: 100%; max-width: 560px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: 0 0 0 1px #ffffff06, var(--shadow);
+    transition: background .2s, border-color .2s;
+  }
+
+  /* ── Tabs ── */
+  .tabs {
+    display: flex; gap: 4px;
+    background: var(--bg-tabs);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 4px;
+    margin-bottom: 20px;
+    transition: background .2s;
+  }
+  .tab {
+    flex: 1; background: none; border: none;
+    color: var(--text-dim); padding: 7px 12px;
+    border-radius: 7px; font: inherit; font-size: 12px; font-weight: 500;
+    cursor: pointer; transition: all .15s; letter-spacing: .01em;
+  }
+  .tab.active { background: var(--bg-tab-act); color: var(--text-strong); box-shadow: 0 1px 4px #00000018 }
+  .tab:hover:not(.active) { color: var(--text) }
+
+  /* ── Panel ── */
+  .panel { display: none }
+  .panel.active { display: flex; flex-direction: column; gap: 10px }
+
+  /* ── Inputs ── */
+  textarea, input[type=text], select {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-strong);
+    border-radius: 10px;
+    font: inherit; font-size: 13px;
+    outline: none;
+    transition: border-color .15s, background .2s;
+  }
+  textarea:focus, input[type=text]:focus, select:focus { border-color: var(--border-focus) }
+  textarea::placeholder, input[type=text]::placeholder { color: var(--placeholder) }
+
+  textarea {
+    padding: 12px 14px; resize: vertical; min-height: 96px;
+    line-height: 1.6;
+  }
+  input[type=text] { padding: 10px 14px }
+  select {
+    padding: 10px 14px; cursor: pointer; appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+  }
+
+  /* ── Badge ── */
   .badge {
-    font-size: 11px; background: #f2994a22; color: #f2994a;
-    border: 1px solid #f2994a44; border-radius: 4px; padding: 2px 8px;
-    display: none;
+    display: none; align-self: flex-start;
+    font-size: 11px; font-weight: 500;
+    background: #f2994a18; color: #f2994a;
+    border: 1px solid #f2994a30; border-radius: 6px;
+    padding: 3px 10px; letter-spacing: .02em;
   }
   .badge.visible { display: inline-block }
-  .form { display: flex; flex-direction: column; gap: 10px }
-  textarea {
-    background: #181818; border: 1px solid #2a2a2a; color: #e0e0e0;
-    padding: 12px; border-radius: 6px; font: inherit; resize: vertical;
-    min-height: 90px; outline: none; transition: border-color .15s;
+
+  /* ── Button row ── */
+  .actions { display: flex; gap: 8px; align-items: stretch }
+
+  .btn-primary {
+    flex: 1; background: var(--text-head); color: var(--bg); border: none;
+    padding: 10px 20px; border-radius: 10px; font: inherit;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: opacity .15s, transform .1s;
+    letter-spacing: .01em;
   }
-  textarea:focus { border-color: #444 }
-  textarea::placeholder { color: #444 }
-  .row { display: flex; gap: 8px; align-items: stretch }
-  select {
-    background: #181818; border: 1px solid #2a2a2a; color: #aaa;
-    padding: 0 12px; border-radius: 6px; font: inherit; outline: none;
-    cursor: pointer; appearance: none; min-width: 140px;
+  .btn-primary:hover:not(:disabled) { opacity: .88 }
+  .btn-primary:active:not(:disabled) { transform: scale(.98) }
+  .btn-primary:disabled { background: var(--btn-dis-bg); color: var(--btn-dis-fg); cursor: not-allowed }
+
+  .btn-ghost {
+    flex: none; background: transparent; border: 1px solid var(--border);
+    color: var(--text-dim); padding: 10px 14px; border-radius: 10px;
+    font: inherit; font-size: 13px; cursor: pointer;
+    transition: all .15s; display: none;
   }
-  select:focus { border-color: #444 }
-  button {
-    flex: 1; background: #fff; color: #111; border: none;
-    padding: 10px 20px; border-radius: 6px; font: inherit;
-    font-weight: 600; cursor: pointer; transition: background .15s;
+  .btn-ghost.visible, .btn-ghost.show { display: block }
+  .btn-ghost:hover { color: var(--text-strong); border-color: var(--border-focus) }
+
+  .btn-danger {
+    flex: none; background: transparent; border: 1px solid #eb575730;
+    color: #eb5757; padding: 10px 14px; border-radius: 10px;
+    font: inherit; font-size: 13px; cursor: pointer;
+    transition: all .15s; display: none;
   }
-  button:hover:not(:disabled) { background: #e0e0e0 }
-  button:disabled { background: #222; color: #555; cursor: not-allowed }
-  #open-btn {
-    flex: none; background: transparent; color: #555; border: 1px solid #2a2a2a;
-    padding: 10px 14px; font-weight: 400; display: none;
-  }
-  #open-btn.visible { display: block }
-  #open-btn:hover { color: #aaa; border-color: #444 }
-  #cancel-btn {
-    flex: none; background: transparent; color: #eb5757; border: 1px solid #eb575744;
-    padding: 10px 14px; font-weight: 400; display: none;
-  }
-  #cancel-btn.visible { display: block }
-  #cancel-btn:hover:not(:disabled) { background: #eb575714; border-color: #eb5757 }
+  .btn-danger.visible, .btn-danger.show { display: block }
+  .btn-danger:hover:not(:disabled) { background: #eb575712; border-color: #eb5757 }
+  .btn-danger:disabled { opacity: .4; cursor: not-allowed }
+
+  /* ── Log ── */
   .log {
-    margin-top: 20px; background: #181818; border: 1px solid #222;
-    border-radius: 6px; padding: 14px 16px; height: 340px;
-    overflow-y: auto; font-size: 12px; line-height: 1.7;
-    white-space: pre-wrap; word-break: break-all; display: none;
+    margin-top: 16px; width: 100%; max-width: 560px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    height: 280px; overflow-y: auto;
+    font: 11.5px/1.8 'SF Mono', ui-monospace, monospace;
+    white-space: pre-wrap; word-break: break-all;
+    display: none;
+    transition: background .2s, border-color .2s;
   }
   .log.visible { display: block }
-  .log::-webkit-scrollbar { width: 4px }
-  .log::-webkit-scrollbar-thumb { background: #333; border-radius: 2px }
-  .l-log    { color: #666 }
-  .l-start  { color: #7eb8f7; font-weight: 600; margin-top: 6px }
+  .log::-webkit-scrollbar { width: 3px }
+  .log::-webkit-scrollbar-thumb { background: var(--log-thumb); border-radius: 2px }
+
+  .l-log    { color: var(--log-dim) }
+  .l-start  { color: #7eb8f7; font-weight: 600; margin-top: 4px }
   .l-done   { color: #6fcf97; font-weight: 600 }
   .l-failed { color: #eb5757; font-weight: 600 }
   .l-info   { color: #f2994a }
   .l-proxy  { color: #bb87fc }
+
+  /* ── Footer ── */
+  .footer {
+    margin-top: 28px; font-size: 11px; color: var(--text-muted);
+    letter-spacing: .03em;
+  }
 </style>
 </head>
 <body>
-<div class="header">
+
+<button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme">🌙</button>
+
+<div class="hero">
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z" fill="var(--bg)"/>
+    </svg>
+  </div>
   <h1>YT-DL</h1>
-  <span class="badge" id="badge"></span>
+  <p>Download videos, audio, and files</p>
 </div>
-<div class="form">
-  <textarea id="urls" placeholder="Paste URLs — one per line or comma-separated"></textarea>
-  <div class="row">
+
+<div class="card">
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('yt')">Video / Audio</button>
+    <button class="tab" onclick="switchTab('curl')">Direct Download</button>
+  </div>
+
+  <div class="panel active" id="panel-yt">
+    <textarea id="urls" placeholder="Paste URLs — one per line or comma-separated"></textarea>
+    <span class="badge" id="badge"></span>
     <select id="quality">
       <option value="best">Best quality</option>
       <option value="1080">1080p</option>
       <option value="720">720p</option>
       <option value="480">480p</option>
-      <option value="audio">Audio MP3</option>
+      <option value="audio">Audio only (MP3)</option>
     </select>
-    <button id="dl-btn" onclick="startDownload()">Download</button>
-    <button id="cancel-btn" onclick="cancelDownload()">Cancel</button>
-    <button id="open-btn" onclick="openFolder()">Open folder</button>
+    <div class="actions">
+      <button class="btn-primary" id="dl-btn" onclick="startDownload()">Download</button>
+      <button class="btn-danger" id="cancel-btn" onclick="cancelDownload()">Cancel</button>
+      <button class="btn-ghost" id="open-btn" onclick="openFolder()">Open folder</button>
+    </div>
+  </div>
+
+  <div class="panel" id="panel-curl">
+    <input type="text" id="curl-url" placeholder="https://…" />
+    <input type="text" id="curl-filename" placeholder="Filename (leave blank to auto-detect)" />
+    <div class="actions">
+      <button class="btn-primary" id="curl-dl-btn" onclick="startCurlDownload()">Download</button>
+      <button class="btn-danger" id="curl-cancel-btn" onclick="cancelDownload()">Cancel</button>
+      <button class="btn-ghost" id="curl-open-btn" onclick="openFolder()">Open folder</button>
+    </div>
   </div>
 </div>
+
 <div class="log" id="log"></div>
 
+<div class="footer">~/Downloads/yt-dl</div>
+
 <script>
+// Theme
+const toggleBtn = document.getElementById('theme-toggle');
+function applyTheme(light) {
+  document.body.classList.toggle('light', light);
+  toggleBtn.textContent = light ? '🌙' : '☀️';
+}
+function toggleTheme() {
+  const light = !document.body.classList.contains('light');
+  localStorage.setItem('theme', light ? 'light' : 'dark');
+  applyTheme(light);
+}
+applyTheme(localStorage.getItem('theme') === 'light');
+
 const log      = document.getElementById('log');
 const btn      = document.getElementById('dl-btn');
 const cancelB  = document.getElementById('cancel-btn');
@@ -135,25 +336,23 @@ const openB    = document.getElementById('open-btn');
 const badge    = document.getElementById('badge');
 const textarea = document.getElementById('urls');
 
-// Load links.txt on page open
 fetch('/links').then(r => r.json()).then(({ urls }) => {
   if (urls.length) {
     textarea.value = urls.join('\n');
-    badge.textContent = `links.txt  ·  ${urls.length} URL${urls.length > 1 ? 's' : ''}`;
+    badge.textContent = `links.txt · ${urls.length} URL${urls.length > 1 ? 's' : ''}`;
     badge.classList.add('visible');
   }
 });
 
-textarea.addEventListener('input', () => {
-  badge.classList.remove('visible');
-});
+textarea.addEventListener('input', () => badge.classList.remove('visible'));
 
 function appendLine(text, cls) {
   const d = document.createElement('div');
   d.className = 'l-' + cls;
   d.textContent = text;
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   log.appendChild(d);
-  log.scrollTop = log.scrollHeight;
+  if (atBottom) log.scrollTop = log.scrollHeight;
 }
 
 function classifyLine(text) {
@@ -162,10 +361,44 @@ function classifyLine(text) {
   return 'log';
 }
 
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', ['yt','curl'][i] === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+}
+
+function streamSSE(endpoint, body, handlers) {
+  fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(res => {
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    function read() {
+      reader.read().then(({ done, value }) => {
+        if (done) { handlers.done?.(); return; }
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const part of parts) {
+          if (!part.startsWith('data: ')) continue;
+          try { handlers.event?.(JSON.parse(part.slice(6))); } catch(e) {}
+        }
+        read();
+      });
+    }
+    read();
+  }).catch(err => {
+    appendLine('Error: ' + err.message, 'failed');
+    handlers.done?.();
+  });
+}
+
 function startDownload() {
   const raw = textarea.value.trim();
   if (!raw) return;
-
   const urls = raw.split(/[\n,]+/).map(u => u.trim()).filter(Boolean);
   const quality = document.getElementById('quality').value;
 
@@ -177,71 +410,81 @@ function startDownload() {
   openB.classList.remove('visible');
   badge.classList.remove('visible');
 
-  fetch('/download', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ urls: urls.join('\n'), quality })
-  }).then(res => {
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-
-    function read() {
-      reader.read().then(({ done, value }) => {
-        if (done) { btn.disabled = false; cancelB.classList.remove('visible'); return; }
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split('\n\n');
-        buf = parts.pop();
-        for (const part of parts) {
-          if (!part.startsWith('data: ')) continue;
-          try {
-            const ev = JSON.parse(part.slice(6));
-            if (ev.type === 'start') {
-              appendLine(`▶ [${ev.index}/${ev.total}]  ${ev.url}`, 'start');
-            } else if (ev.type === 'log') {
-              if (ev.text) appendLine(ev.text, classifyLine(ev.text));
-            } else if (ev.type === 'done') {
-              appendLine(`✓  done`, 'done');
-            } else if (ev.type === 'failed') {
-              appendLine(`✗  failed`, 'failed');
-            } else if (ev.type === 'cancelled') {
-              appendLine('⊘  cancelled', 'failed');
-              btn.disabled = false;
-              cancelB.classList.remove('visible');
-            } else if (ev.type === 'all_done') {
-              appendLine('─── all downloads finished ───', 'info');
-              btn.disabled = false;
-              cancelB.classList.remove('visible');
-              openB.classList.add('visible');
-              if (ev.failed_count > 0) {
-                // Reload links.txt — server wrote failed URLs back
-                fetch('/links').then(r => r.json()).then(({ urls }) => {
-                  textarea.value = urls.join('\n');
-                  badge.textContent = `${ev.failed_count} failed — retry?`;
-                  badge.style.background = '#eb575722';
-                  badge.style.color = '#eb5757';
-                  badge.style.borderColor = '#eb575744';
-                  badge.classList.add('visible');
-                });
-              } else {
-                textarea.value = '';
-              }
-            }
-          } catch(e) {}
+  streamSSE('/download', { urls: urls.join('\n'), quality }, {
+    event(ev) {
+      if (ev.type === 'start') {
+        appendLine(`▶  [${ev.index}/${ev.total}]  ${ev.url}`, 'start');
+      } else if (ev.type === 'log') {
+        if (ev.text) appendLine(ev.text, classifyLine(ev.text));
+      } else if (ev.type === 'done') {
+        appendLine('✓  done', 'done');
+      } else if (ev.type === 'failed') {
+        appendLine('✗  failed', 'failed');
+      } else if (ev.type === 'cancelled') {
+        appendLine('⊘  cancelled', 'failed');
+        btn.disabled = false; cancelB.classList.remove('visible');
+      } else if (ev.type === 'all_done') {
+        appendLine('─── finished ───', 'info');
+        btn.disabled = false; cancelB.classList.remove('visible');
+        openB.classList.add('visible');
+        if (ev.failed_count > 0) {
+          fetch('/links').then(r => r.json()).then(({ urls }) => {
+            textarea.value = urls.join('\n');
+            badge.textContent = `${ev.failed_count} failed — retry?`;
+            badge.style.cssText = 'background:#eb575718;color:#eb5757;border-color:#eb575730';
+            badge.classList.add('visible');
+          });
+        } else {
+          textarea.value = '';
         }
-        read();
-      });
+      }
+    },
+    done() { btn.disabled = false; cancelB.classList.remove('visible'); }
+  });
+}
+
+function startCurlDownload() {
+  const url = document.getElementById('curl-url').value.trim();
+  if (!url) return;
+  const filename = document.getElementById('curl-filename').value.trim();
+
+  log.innerHTML = '';
+  log.classList.add('visible');
+  document.getElementById('curl-dl-btn').disabled = true;
+  document.getElementById('curl-cancel-btn').classList.add('show');
+  document.getElementById('curl-open-btn').classList.remove('show');
+
+  streamSSE('/curl-download', { url, filename }, {
+    event(ev) {
+      if (ev.type === 'start') {
+        appendLine(`▶  ${ev.url}`, 'start');
+      } else if (ev.type === 'log') {
+        if (ev.text) appendLine(ev.text, 'log');
+      } else if (ev.type === 'done') {
+        appendLine('✓  done', 'done');
+        document.getElementById('curl-dl-btn').disabled = false;
+        document.getElementById('curl-cancel-btn').classList.remove('show');
+        document.getElementById('curl-open-btn').classList.add('show');
+      } else if (ev.type === 'failed') {
+        appendLine('✗  failed', 'failed');
+        document.getElementById('curl-dl-btn').disabled = false;
+        document.getElementById('curl-cancel-btn').classList.remove('show');
+      } else if (ev.type === 'cancelled') {
+        appendLine('⊘  cancelled', 'failed');
+        document.getElementById('curl-dl-btn').disabled = false;
+        document.getElementById('curl-cancel-btn').classList.remove('show');
+      }
+    },
+    done() {
+      document.getElementById('curl-dl-btn').disabled = false;
+      document.getElementById('curl-cancel-btn').classList.remove('show');
     }
-    read();
-  }).catch(err => {
-    appendLine('Error: ' + err.message, 'failed');
-    btn.disabled = false;
-    cancelB.classList.remove('visible');
   });
 }
 
 function cancelDownload() {
-  cancelB.disabled = true;
+  document.getElementById('cancel-btn').disabled = true;
+  document.getElementById('curl-cancel-btn').disabled = true;
   fetch('/cancel', { method: 'POST' });
 }
 
@@ -251,6 +494,9 @@ function openFolder() {
 
 textarea.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') startDownload();
+});
+document.getElementById('curl-url').addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') startCurlDownload();
 });
 </script>
 </body>
@@ -296,6 +542,107 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     _active_proc.terminate()
             self.send_response(204)
             self.end_headers()
+            return
+
+        if self.path == '/curl-download':
+            length = int(self.headers.get('Content-Length', 0))
+            data = json.loads(self.rfile.read(length))
+            url = data.get('url', '').strip()
+            filename = data.get('filename', '').strip()
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('X-Accel-Buffering', 'no')
+            self.end_headers()
+
+            def send(msg):
+                try:
+                    self.wfile.write(f'data: {json.dumps(msg)}\n\n'.encode())
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            _cancel_flag.clear()
+            send({'type': 'start', 'url': url})
+
+            if not filename:
+                # derive from URL path, fallback to 'download'
+                filename = url.rstrip('/').split('/')[-1].split('?')[0] or 'download'
+
+            out_path = os.path.join(OUTPUT_DIR, filename)
+            STALL_SECONDS = 60
+            MAX_RETRIES = 20
+
+            def do_curl():
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+                return subprocess.Popen(
+                    ['curl', '-L', '-s', '-o', out_path, url],
+                    env={**os.environ, 'TERM': 'dumb'}
+                )
+
+            try:
+                for attempt in range(1, MAX_RETRIES + 1):
+                    proc = do_curl()
+                    with _proc_lock:
+                        _active_proc = proc
+
+                    start_time = time.time()
+                    last_change_time = start_time
+                    last_size = -1
+                    stalled = False
+
+                    while proc.poll() is None:
+                        if _cancel_flag.is_set():
+                            proc.terminate()
+                            break
+                        time.sleep(1)
+                        try:
+                            size = os.path.getsize(out_path)
+                        except FileNotFoundError:
+                            size = 0
+                        if size != last_size:
+                            last_size = size
+                            last_change_time = time.time()
+                        elif time.time() - last_change_time > STALL_SECONDS:
+                            proc.terminate()
+                            stalled = True
+                            break
+                        elapsed = max(time.time() - start_time, 0.001)
+                        speed = size / elapsed
+                        send({'type': 'log', 'text': f'{size / 1_048_576:.2f} MB   avg {speed / 1_048_576:.2f} MB/s'})
+
+                    proc.wait()
+                    with _proc_lock:
+                        _active_proc = None
+
+                    if _cancel_flag.is_set():
+                        send({'type': 'cancelled'})
+                        break
+
+                    if stalled:
+                        send({'type': 'log', 'text': f'Stalled — retrying ({attempt}/{MAX_RETRIES})...'})
+                        continue
+
+                    if proc.returncode == 0:
+                        try:
+                            final = os.path.getsize(out_path)
+                            send({'type': 'log', 'text': f'Total: {final / 1_048_576:.2f} MB'})
+                        except FileNotFoundError:
+                            pass
+                        send({'type': 'done'})
+                        break
+
+                    # non-zero exit — if partial file exists try to resume, else retry fresh
+                    send({'type': 'log', 'text': f'Error (attempt {attempt}/{MAX_RETRIES}), retrying...'})
+
+                else:
+                    send({'type': 'failed'})
+
+            except Exception as e:
+                send({'type': 'failed', 'text': str(e)})
             return
 
         if self.path != '/download':
