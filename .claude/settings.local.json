@@ -9,7 +9,13 @@
       "Read(//Applications/**)",
       "Bash(ruby -ryaml -e \"YAML.load_file\\('.github/workflows/batch-fix.yml'\\); puts 'YAML OK'\")",
       "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/omid/Developer/Github/yt-dl/server.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "mcp__claude_ai_Notion__notion-create-pages"
+      "mcp__claude_ai_Notion__notion-create-pages",
+      "Bash(mkdir -p ~/.claude/skills/session-writeup && echo \"dir ready: $\\(echo ~\\)/.claude/skills/session-writeup\")",
+      "Bash(curl -L --no-progress-meter -w \"Downloaded: %{size_download} bytes  |  Speed: %{speed_download} B/s  |  Time: %{time_total}s\\\\n\" -o /tmp/test-yt-dl.zip \"https://codeload.github.com/heidariomid/yt-dl/zip/refs/heads/main\")",
+      "Bash(echo \"EXIT: $?\")"
+    ],
+    "additionalDirectories": [
+      "/Users/omid/.claude/skills"
     ]
   }
 }
