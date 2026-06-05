@@ -44,24 +44,24 @@ HTML = r"""<!DOCTYPE html>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
 
   :root {
-    --bg:         #0a0a0a;
-    --bg-card:    #161616;
-    --bg-input:   #1a1a1a;
-    --bg-tabs:    #0f0f0f;
-    --bg-tab-act: #252525;
-    --border:     #2a2a2a;
-    --border-focus: #444;
-    --text:       #d0d0d0;
-    --text-strong:#f0f0f0;
+    --bg:         #1a1a2e;
+    --bg-card:    #242438;
+    --bg-input:   #2a2a40;
+    --bg-tabs:    #1e1e32;
+    --bg-tab-act: #363650;
+    --border:     #3a3a58;
+    --border-focus: #6060a0;
+    --text:       #e0e0f0;
+    --text-strong:#f5f5ff;
     --text-head:  #fff;
-    --text-dim:   #666;
-    --text-muted: #333;
-    --placeholder:#3a3a3a;
+    --text-dim:   #9090b8;
+    --text-muted: #555575;
+    --placeholder:#606080;
     --shadow:     0 24px 64px #00000080;
-    --btn-dis-bg: #1e1e1e;
-    --btn-dis-fg: #444;
-    --log-thumb:  #2e2e2e;
-    --log-dim:    #555;
+    --btn-dis-bg: #2e2e48;
+    --btn-dis-fg: #6060a0;
+    --log-thumb:  #3e3e60;
+    --log-dim:    #8080a8;
   }
   .light {
     --bg:         #f5f5f5;
