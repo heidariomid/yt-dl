@@ -60,9 +60,9 @@ HTML = r"""<!DOCTYPE html>
     --shadow:     0 24px 64px #00000080;
     --btn-dis-bg: #1e1e1e;
     --btn-dis-fg: #444;
-    --btn-pri-bg: #f2994a;
+    --btn-pri-bg: #e07b2a;
     --btn-pri-fg: #1a1206;
-    --btn-pri-hov:#f4a862;
+    --btn-pri-hov:#ed8a3d;
     --log-thumb:  #2e2e2e;
     --log-dim:    #555;
   }
@@ -122,7 +122,7 @@ HTML = r"""<!DOCTYPE html>
   }
   .logo {
     width: 52px; height: 52px;
-    background: var(--text-head);
+    background: var(--btn-pri-bg);
     border-radius: 14px;
     display: inline-flex; align-items: center; justify-content: center;
     margin-bottom: 16px;
@@ -276,7 +276,7 @@ HTML = r"""<!DOCTYPE html>
 <div class="hero">
   <div class="logo">
     <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z" fill="var(--bg)"/>
+      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z" fill="var(--btn-pri-fg)"/>
     </svg>
   </div>
   <h1>YT-DL</h1>
