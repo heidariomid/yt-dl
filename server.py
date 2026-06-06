@@ -60,6 +60,9 @@ HTML = r"""<!DOCTYPE html>
     --shadow:     0 24px 64px #00000080;
     --btn-dis-bg: #1e1e1e;
     --btn-dis-fg: #444;
+    --btn-pri-bg: #f2994a;
+    --btn-pri-fg: #1a1206;
+    --btn-pri-hov:#f4a862;
     --log-thumb:  #2e2e2e;
     --log-dim:    #555;
   }
@@ -80,6 +83,9 @@ HTML = r"""<!DOCTYPE html>
     --shadow:     0 24px 64px #00000018;
     --btn-dis-bg: #e8e8e8;
     --btn-dis-fg: #aaa;
+    --btn-pri-bg: var(--text-head);
+    --btn-pri-fg: var(--bg);
+    --btn-pri-hov:var(--text-head);
     --log-thumb:  #ddd;
     --log-dim:    #bbb;
   }
@@ -203,13 +209,13 @@ HTML = r"""<!DOCTYPE html>
   .actions { display: flex; gap: 8px; align-items: stretch }
 
   .btn-primary {
-    flex: 1; background: var(--text-head); color: var(--bg); border: none;
+    flex: 1; background: var(--btn-pri-bg); color: var(--btn-pri-fg); border: none;
     padding: 10px 20px; border-radius: 10px; font: inherit;
     font-size: 13px; font-weight: 600; cursor: pointer;
-    transition: opacity .15s, transform .1s;
+    transition: background .15s, opacity .15s, transform .1s;
     letter-spacing: .01em;
   }
-  .btn-primary:hover:not(:disabled) { opacity: .88 }
+  .btn-primary:hover:not(:disabled) { background: var(--btn-pri-hov); opacity: .88 }
   .btn-primary:active:not(:disabled) { transform: scale(.98) }
   .btn-primary:disabled { background: var(--btn-dis-bg); color: var(--btn-dis-fg); cursor: not-allowed }
 
