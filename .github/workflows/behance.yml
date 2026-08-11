@@ -116,7 +116,11 @@ jobs:
           COUNT=$(find tmp_images -type f | wc -l)
           echo "Downloaded $COUNT file(s)"
           if [ "$COUNT" -eq 0 ]; then
-            echo "::error::No images downloaded. If the gallery is age-restricted, set the BEHANCE_COOKIES secret."
+            if grep -q "age-restricted" /tmp/dl.log; then
+              echo "::error::Every gallery was age-restricted. Behance returns no images to anonymous requests for these. Export cookies.txt from a logged-in Behance session, then add it base64-encoded as the BEHANCE_COOKIES repo secret."
+            else
+              echo "::error::No images downloaded — see the log above."
+            fi
             exit 1
           fi
 

@@ -40,6 +40,9 @@ _opener.addheaders = [
 ]
 
 
+_mature_skips = 0
+
+
 def log(msg):
     print(msg, flush=True)
 
@@ -141,6 +144,63 @@ def best_url(module):
     return module.get("src")
 
 
+def _add_cookie(name, value, domain=".behance.net"):
+    _cj.set_cookie(http.cookiejar.Cookie(
+        0, name, value, None, False, domain, True, domain.startswith("."),
+        "/", True, True, 2 ** 31, False, None, None, {}))
+
+
+def _load_cookies(path):
+    """Load cookies from a Netscape or JSON export. Returns count loaded."""
+    raw = ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            raw = fh.read()
+    except OSError as e:
+        log(f"! could not read cookies file: {e}")
+        return 0
+
+    # Browser extensions often export JSON instead of Netscape format.
+    stripped = raw.lstrip()
+    if stripped.startswith("[") or stripped.startswith("{"):
+        try:
+            data = json.loads(raw)
+            items = data if isinstance(data, list) else data.get("cookies", [])
+            n = 0
+            for c in items:
+                name, value = c.get("name"), c.get("value")
+                if name and value is not None:
+                    _add_cookie(name, value, c.get("domain") or ".behance.net")
+                    n += 1
+            log(f"Loaded {n} cookie(s) from JSON export")
+            return n
+        except Exception as e:  # noqa: BLE001
+            log(f"! could not parse JSON cookies: {e}")
+            return 0
+
+    # Netscape format — tolerate a missing header line, which MozillaCookieJar
+    # rejects outright even when every cookie line is well-formed.
+    tmp = path
+    if "# Netscape HTTP Cookie File" not in raw:
+        tmp = os.path.join(os.path.dirname(os.path.abspath(path)),
+                           ".behance_cookies_normalized.txt")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write("# Netscape HTTP Cookie File\n" + raw)
+
+    jar = http.cookiejar.MozillaCookieJar(tmp)
+    try:
+        jar.load(ignore_discard=True, ignore_expires=True)
+    except Exception as e:  # noqa: BLE001
+        log(f"! could not load cookies: {e}")
+        return 0
+    n = 0
+    for c in jar:
+        _cj.set_cookie(c)
+        n += 1
+    log(f"Loaded {n} cookie(s) from {path}")
+    return n
+
+
 def sanitize(name, fallback="untitled"):
     name = re.sub(r"[^\w\s.-]", "", str(name or "")).strip()
     name = re.sub(r"\s+", " ", name)
@@ -202,6 +262,8 @@ def do_gallery(gid, outdir, module_id=None):
         access = data.get("matureAccess")
         if access and access != "allowed":
             # Behance returns zero modules for age-gated work unless logged in.
+            global _mature_skips
+            _mature_skips += 1
             log(f"    ! skipped: mature/age-restricted (matureAccess={access}); "
                 f"requires BEHANCE_COOKIES from a logged-in account")
             return 0, 1
@@ -272,15 +334,20 @@ def main():
 
     _install_socks_proxy()
 
-    if args.cookies and os.path.exists(args.cookies):
-        jar = http.cookiejar.MozillaCookieJar(args.cookies)
-        try:
-            jar.load(ignore_discard=True, ignore_expires=True)
-            for c in jar:
-                _cj.set_cookie(c)
-            log(f"Loaded cookies from {args.cookies}")
-        except Exception as e:  # noqa: BLE001
-            log(f"! could not load cookies: {e}")
+    if args.cookies:
+        # Loud failures here: a silently-ignored cookie file looks identical to
+        # "no cookies", which surfaces later as a confusing mature-content skip.
+        if not os.path.exists(args.cookies):
+            log(f"! cookies file not found: {args.cookies}")
+            return 2
+        n = _load_cookies(args.cookies)
+        if not n:
+            return 2
+        names = {c.name for c in _cj}
+        if not names & {"bcp-sid", "sid", "adobe_sso", "user_sid", "bcp"}:
+            log("! warning: cookies loaded but no Behance session cookie found; "
+                "mature galleries will still be skipped. Export cookies for "
+                "behance.net while logged in.")
 
     os.makedirs(args.output, exist_ok=True)
 
@@ -311,6 +378,11 @@ def main():
             total_fail += fail
 
     log(f"\nDone. {total_ok} image(s) downloaded, {total_fail} failure(s).")
+    if not total_ok and _mature_skips:
+        log(f"\nAll {_mature_skips} gallery/galleries were age-restricted. "
+            "Behance serves no images for these unless the request is "
+            "authenticated — set the BEHANCE_COOKIES secret to a base64 "
+            "cookies.txt exported while logged in to Behance.")
     return 0 if total_ok else 1
 
 
