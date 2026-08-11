@@ -150,8 +150,24 @@ def _add_cookie(name, value, domain=".behance.net"):
         "/", True, True, 2 ** 31, False, None, None, {}))
 
 
+def _load_cookie_header(raw):
+    """Load a raw 'name=value; name=value' Cookie header string."""
+    n = 0
+    for part in raw.strip().rstrip(";").split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, _, value = part.partition("=")
+        name = name.strip()
+        if name:
+            _add_cookie(name, value.strip())
+            n += 1
+    log(f"Loaded {n} cookie(s) from Cookie header string")
+    return n
+
+
 def _load_cookies(path):
-    """Load cookies from a Netscape or JSON export. Returns count loaded."""
+    """Load cookies from a Netscape file, JSON export, or Cookie header."""
     raw = ""
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
@@ -162,6 +178,15 @@ def _load_cookies(path):
 
     # Browser extensions often export JSON instead of Netscape format.
     stripped = raw.lstrip()
+
+    # A raw "Cookie:" header string (what devtools "Copy as cURL" yields) has
+    # no tabs and no Netscape header, but does have name=value; pairs.
+    if (not stripped.startswith(("[", "{"))
+            and "\t" not in raw
+            and "# Netscape" not in raw
+            and "=" in raw):
+        return _load_cookie_header(raw)
+
     if stripped.startswith("[") or stripped.startswith("{"):
         try:
             data = json.loads(raw)
@@ -344,7 +369,9 @@ def main():
         if not n:
             return 2
         names = {c.name for c in _cj}
-        if not names & {"bcp-sid", "sid", "adobe_sso", "user_sid", "bcp"}:
+        # Behance auth rides on Adobe IMS cookies (sso_sid/sso_uid/iat0).
+        if not names & {"sso_sid", "sso_uid", "iat0", "adobe_sso",
+                        "bcp-sid", "sid", "user_sid"}:
             log("! warning: cookies loaded but no Behance session cookie found; "
                 "mature galleries will still be skipped. Export cookies for "
                 "behance.net while logged in.")

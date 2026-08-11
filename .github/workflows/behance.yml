@@ -80,19 +80,29 @@ jobs:
 
       - name: Restore Behance cookies (optional)
         env:
-          BEHANCE_COOKIES_B64: ${{ secrets.BEHANCE_COOKIES }}
+          BEHANCE_COOKIES_SECRET: ${{ secrets.BEHANCE_COOKIES }}
         run: |
           # Age-restricted ("mature") galleries return zero image modules to
-          # anonymous requests. Add a base64-encoded Netscape cookies.txt from a
-          # logged-in Behance account as the BEHANCE_COOKIES repo secret to fetch them.
-          if [ -n "$BEHANCE_COOKIES_B64" ]; then
-            echo "$BEHANCE_COOKIES_B64" | base64 -d > /tmp/behance_cookies.txt 2>/dev/null \
-              && echo "BEHANCE_COOKIES=/tmp/behance_cookies.txt" >> $GITHUB_ENV \
-              && echo "Behance cookies restored." \
-              || echo "Could not decode BEHANCE_COOKIES; continuing anonymously."
-          else
+          # anonymous requests. Set the BEHANCE_COOKIES repo secret from a
+          # logged-in Behance session; the downloader accepts a Netscape
+          # cookies.txt, a JSON export, or a raw "name=value; ..." header
+          # string, either plain or base64-encoded.
+          if [ -z "$BEHANCE_COOKIES_SECRET" ]; then
             echo "No BEHANCE_COOKIES secret set — mature galleries will be skipped."
+            exit 0
           fi
+
+          # Try base64 first; fall back to using the secret verbatim.
+          if printf '%s' "$BEHANCE_COOKIES_SECRET" | base64 -d > /tmp/behance_cookies.txt 2>/dev/null \
+             && [ -s /tmp/behance_cookies.txt ]; then
+            echo "Behance cookies restored (base64)."
+          else
+            printf '%s' "$BEHANCE_COOKIES_SECRET" > /tmp/behance_cookies.txt
+            echo "Behance cookies restored (plain text)."
+          fi
+
+          chmod 600 /tmp/behance_cookies.txt
+          echo "BEHANCE_COOKIES=/tmp/behance_cookies.txt" >> $GITHUB_ENV
 
       - name: Download images
         env:
