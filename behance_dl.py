@@ -44,6 +44,47 @@ def log(msg):
     print(msg, flush=True)
 
 
+def _install_socks_proxy():
+    """Route all sockets through a SOCKS proxy if one is configured.
+
+    urllib understands http:// proxies only — handed a socks5:// URL it would
+    speak HTTP at the SOCKS port and fail. PySocks patches socket instead.
+    """
+    proxy = ""
+    for var in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy",
+                "PROXY", "HTTP_PROXY", "http_proxy"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            proxy = val
+            break
+    if not proxy or not proxy.lower().startswith("socks"):
+        return  # no proxy, or a plain http:// proxy urllib handles natively
+
+    parts = urllib.parse.urlparse(proxy)
+    # Strip socks proxy vars so urllib doesn't also try to use them as HTTP proxies.
+    for var in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy",
+                "HTTP_PROXY", "http_proxy"):
+        if os.environ.get(var, "").lower().startswith("socks"):
+            os.environ.pop(var, None)
+
+    try:
+        import socks  # PySocks
+        import socket
+    except ImportError:
+        log(f"! {proxy} requested but PySocks is not installed "
+            f"(pip install PySocks); continuing WITHOUT the proxy")
+        return
+
+    kind = socks.SOCKS4 if "socks4" in parts.scheme.lower() else socks.SOCKS5
+    # socks5h => resolve DNS through the proxy (avoids local DNS leaks).
+    remote_dns = parts.scheme.lower().endswith("h") or kind == socks.SOCKS5
+    socks.set_default_proxy(kind, parts.hostname, parts.port or 1080,
+                            rdns=remote_dns, username=parts.username,
+                            password=parts.password)
+    socket.socket = socks.socksocket
+    log(f"Routing traffic through {parts.hostname}:{parts.port or 1080} (SOCKS)")
+
+
 def _set_challenge(token):
     _cj.set_cookie(http.cookiejar.Cookie(
         0, "js_challenge_value", token, None, False,
@@ -228,6 +269,8 @@ def main():
     ap.add_argument("--cookies", default=os.environ.get("BEHANCE_COOKIES", ""),
                     help="Netscape cookie file (for mature/age-gated galleries)")
     args = ap.parse_args()
+
+    _install_socks_proxy()
 
     if args.cookies and os.path.exists(args.cookies):
         jar = http.cookiejar.MozillaCookieJar(args.cookies)

@@ -32,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 1
@@ -57,12 +57,14 @@ jobs:
           sleep 25
 
           # Behance blocks some datacenter ranges; WARP gives a residential-ish exit.
+          # NOTE: do NOT export HTTP_PROXY/HTTPS_PROXY/ALL_PROXY via $GITHUB_ENV.
+          # They would apply to every later step, and actions/checkout's Node
+          # runtime rejects a socks5:// proxy URL ("Invalid URL protocol"),
+          # crashing post-job cleanup. Keep it scoped to the download step only.
           for i in 1 2 3 4 5 6; do
             if curl -s --socks5-hostname 127.0.0.1:1080 -m 15 https://www.behance.net -o /dev/null; then
               echo "WARP proxy is up"
-              echo "ALL_PROXY=socks5h://127.0.0.1:1080" >> $GITHUB_ENV
-              echo "HTTPS_PROXY=socks5h://127.0.0.1:1080" >> $GITHUB_ENV
-              echo "HTTP_PROXY=socks5h://127.0.0.1:1080" >> $GITHUB_ENV
+              echo "WARP_PROXY=socks5h://127.0.0.1:1080" >> $GITHUB_ENV
               break
             fi
             echo "waiting for WARP ($i)…"
@@ -72,6 +74,8 @@ jobs:
       - name: Setup tools
         run: |
           sudo apt-get install -y -qq zip
+          # urllib cannot speak SOCKS on its own; PySocks patches the socket layer.
+          python3 -m pip install --user -q PySocks
           python3 --version
 
       - name: Restore Behance cookies (optional)
@@ -91,6 +95,11 @@ jobs:
           fi
 
       - name: Download images
+        env:
+          # Scope the SOCKS proxy to this step only — see the WARP step's note.
+          ALL_PROXY: ${{ env.WARP_PROXY }}
+          HTTP_PROXY: ${{ env.WARP_PROXY }}
+          HTTPS_PROXY: ${{ env.WARP_PROXY }}
         run: |
           set -o pipefail
           mkdir -p tmp_images
