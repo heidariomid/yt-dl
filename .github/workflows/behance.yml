@@ -1,0 +1,228 @@
+name: Behance Image Downloader
+run-name: "Behance → ${{ inputs.behance_url }}"
+on:
+  workflow_dispatch:
+    inputs:
+      behance_url:
+        description: "Behance URL(s) — gallery, /modules/<id>, or profile. Space/comma/newline separated for batch."
+        required: true
+        type: string
+      limit:
+        description: "Max galleries per profile URL (0 = all)"
+        required: false
+        default: "0"
+        type: string
+      password:
+        description: "Password for zip files (optional)"
+        required: false
+        default: ""
+        type: string
+      use_warp:
+        description: "Route traffic through Cloudflare WARP"
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  download-behance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Configure Git
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global core.compression 0
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+      - name: Start WARP
+        if: ${{ inputs.use_warp }}
+        run: |
+          docker network create warp-net || true
+          docker run -d \
+            --name warp \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            caomingjun/warp
+          sleep 25
+
+          # Behance blocks some datacenter ranges; WARP gives a residential-ish exit.
+          for i in 1 2 3 4 5 6; do
+            if curl -s --socks5-hostname 127.0.0.1:1080 -m 15 https://www.behance.net -o /dev/null; then
+              echo "WARP proxy is up"
+              echo "ALL_PROXY=socks5h://127.0.0.1:1080" >> $GITHUB_ENV
+              echo "HTTPS_PROXY=socks5h://127.0.0.1:1080" >> $GITHUB_ENV
+              echo "HTTP_PROXY=socks5h://127.0.0.1:1080" >> $GITHUB_ENV
+              break
+            fi
+            echo "waiting for WARP ($i)…"
+            sleep 10
+          done
+
+      - name: Setup tools
+        run: |
+          sudo apt-get install -y -qq zip
+          python3 --version
+
+      - name: Restore Behance cookies (optional)
+        env:
+          BEHANCE_COOKIES_B64: ${{ secrets.BEHANCE_COOKIES }}
+        run: |
+          # Age-restricted ("mature") galleries return zero image modules to
+          # anonymous requests. Add a base64-encoded Netscape cookies.txt from a
+          # logged-in Behance account as the BEHANCE_COOKIES repo secret to fetch them.
+          if [ -n "$BEHANCE_COOKIES_B64" ]; then
+            echo "$BEHANCE_COOKIES_B64" | base64 -d > /tmp/behance_cookies.txt 2>/dev/null \
+              && echo "BEHANCE_COOKIES=/tmp/behance_cookies.txt" >> $GITHUB_ENV \
+              && echo "Behance cookies restored." \
+              || echo "Could not decode BEHANCE_COOKIES; continuing anonymously."
+          else
+            echo "No BEHANCE_COOKIES secret set — mature galleries will be skipped."
+          fi
+
+      - name: Download images
+        run: |
+          set -o pipefail
+          mkdir -p tmp_images
+
+          LIMIT="${{ github.event.inputs.limit }}"
+          [ -z "$LIMIT" ] && LIMIT=0
+
+          python3 behance_dl.py \
+            -o tmp_images \
+            --limit "$LIMIT" \
+            ${BEHANCE_COOKIES:+--cookies "$BEHANCE_COOKIES"} \
+            "${{ github.event.inputs.behance_url }}" 2>&1 | tee /tmp/dl.log
+
+          COUNT=$(find tmp_images -type f | wc -l)
+          echo "Downloaded $COUNT file(s)"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No images downloaded. If the gallery is age-restricted, set the BEHANCE_COOKIES secret."
+            exit 1
+          fi
+
+      - name: Package (split >45MB)
+        run: |
+          SPLIT_MB=45
+          SPLIT_BYTES=$((SPLIT_MB * 1024 * 1024))
+          ZIP_PASSWORD="${{ github.event.inputs.password }}"
+
+          BACKUP_DIR="/tmp/behance_backup"
+          rm -rf "$BACKUP_DIR"; mkdir -p "$BACKUP_DIR"
+          echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
+
+          # One folder per gallery, mirroring the video workflows' layout.
+          for dir in tmp_images/*/; do
+            [ -d "$dir" ] || continue
+            NAME=$(basename "$dir")
+            SAFE=$(echo "$NAME" | tr -cd '[:alnum:] ._-' | tr ' ' '_')
+            mkdir -p "$BACKUP_DIR/$SAFE"
+
+            TOTAL=$(du -sb "$dir" | cut -f1)
+
+            if [ "$TOTAL" -gt "$SPLIT_BYTES" ] || [ -n "$ZIP_PASSWORD" ]; then
+              if [ -n "$ZIP_PASSWORD" ]; then
+                zip -0 -r -s "${SPLIT_MB}m" -P "$ZIP_PASSWORD" "/tmp/${SAFE}.zip" "$dir"
+              else
+                zip -0 -r -s "${SPLIT_MB}m" "/tmp/${SAFE}.zip" "$dir"
+              fi
+              for part in /tmp/${SAFE}.z[0-9]* /tmp/${SAFE}.zip; do
+                [ -f "$part" ] || continue
+                mv "$part" "$BACKUP_DIR/$SAFE/${SAFE}.${part##*.}"
+              done
+            else
+              cp "$dir"* "$BACKUP_DIR/$SAFE/" 2>/dev/null || true
+            fi
+
+            # Any single oversized image still needs splitting on its own.
+            for f in "$BACKUP_DIR/$SAFE"/*; do
+              [ -f "$f" ] || continue
+              SZ=$(stat -c%s "$f")
+              case "$f" in *.zip|*.z[0-9]*) continue ;; esac
+              if [ "$SZ" -gt "$SPLIT_BYTES" ]; then
+                BN=$(basename "$f"); EXT="${BN##*.}"; STEM="${BN%.*}"
+                zip -0 -s "${SPLIT_MB}m" -j "/tmp/${STEM}.zip" "$f"
+                rm -f "$f"
+                for part in /tmp/${STEM}.z[0-9]* /tmp/${STEM}.zip; do
+                  [ -f "$part" ] || continue
+                  mv "$part" "$BACKUP_DIR/$SAFE/${STEM}.${part##*.}"
+                done
+              fi
+            done
+
+            {
+              echo "# $NAME"
+              echo
+              echo "Source: https://www.behance.net/gallery/${NAME%% *}"
+              echo
+              echo "## Files"
+              for f in "$BACKUP_DIR/$SAFE"/*; do
+                [ -f "$f" ] || continue
+                B=$(basename "$f")
+                [ "$B" = "README.md" ] && continue
+                echo "- [$B](./$(echo "$B" | sed 's/ /%20/g'))"
+              done
+              echo
+              echo "> Multi-part zips: download every \`.z01\`…\`.zip\` part into one folder, then extract the \`.zip\`."
+            } > "$BACKUP_DIR/$SAFE/README.md"
+          done
+
+          find "$BACKUP_DIR" -type f | head -50
+          echo "Total: $(find "$BACKUP_DIR" -type f | wc -l) file(s)"
+
+      - name: Push images
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          FILE_COUNT=$(find "$BACKUP_DIR" -type f | wc -l)
+          echo "Files found: $FILE_COUNT"
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "No files found!"
+            exit 1
+          fi
+
+          git pull --rebase origin "$BRANCH" || true
+
+          mkdir -p images
+          cp -r "$BACKUP_DIR"/* images/
+
+          git add images/
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "🖼️ Add Behance images" || echo "No changes"
+
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:"$BRANCH"; then
+              echo "Pushed successfully"
+              break
+            fi
+            echo "Push failed, rebasing and retrying ($attempt)…"
+            git pull --rebase origin "$BRANCH" || true
+            sleep 5
+          done
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Behance download" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -40 /tmp/dl.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "no log" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
