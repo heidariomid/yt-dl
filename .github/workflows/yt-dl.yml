@@ -138,13 +138,8 @@ jobs:
           PLAYLIST="${{ github.event.inputs.playlist }}"
           PLAYLIST_ITEMS="${{ github.event.inputs.playlist_items }}"
 
-          # Playlist mode. By default every yt-dlp call passes --no-playlist so a
-          # watch?v=...&list=... URL only grabs the single video. With the playlist
-          # input on we pass --yes-playlist instead, prefix filenames with the
-          # playlist index so the car/USB stick plays them in order, and let
-          # --playlist-items narrow the range (e.g. "1-20").
-          #
-          # PL_FLAGS is expanded unquoted at the call sites, so keep it as an array.
+          # Playlist mode: --yes-playlist + index-prefixed filenames (so a USB
+          # stick plays them in order); --playlist-items narrows the range.
           if [ "$PLAYLIST" = "true" ]; then
             PL_FLAGS=(--yes-playlist --ignore-errors)
             [ -n "$PLAYLIST_ITEMS" ] && PL_FLAGS+=(--playlist-items "$PLAYLIST_ITEMS")
@@ -212,17 +207,9 @@ jobs:
             fi
           }
 
-          # Car-stereo MP3 profile. Head units (especially older/USB ones) choke on
-          # VBR LAME and on ID3v2.4 tags, so instead of yt-dlp's default
-          # "--audio-quality 0" (VBR V0) we force exactly the ffmpeg recipe that is
-          # known to play in the car:
-          #   ffmpeg -i in.m4a -c:a libmp3lame -b:a 320k -ar 44100 \
-          #          -map_metadata 0 -id3v2_version 3 out.mp3
-          #   * libmp3lame @ 320k CBR  — constant bitrate, universally seekable
-          #   * -ar 44100              — CD sample rate; some units reject 48 kHz MP3
-          #   * -map_metadata 0        — carry title/artist over from the source
-          #   * -id3v2_version 3       — ID3v2.3, not the 2.4 default many units ignore
-          # These are passed to the ExtractAudio post-processor's ffmpeg call.
+          # Car-stereo MP3 profile: car head units reject VBR LAME (yt-dlp's
+          # default --audio-quality 0), reject 48 kHz, and ignore ID3v2.4 tags.
+          # Force 320k CBR / 44.1 kHz / ID3v2.3 on the ExtractAudio ffmpeg call.
           MP3_CAR=(
             --postprocessor-args "ExtractAudio:-c:a libmp3lame -b:a 320k -ar 44100 -map_metadata 0 -id3v2_version 3"
             --embed-metadata
@@ -563,14 +550,12 @@ jobs:
                 DOWNLOADED_FILE=$(find tmp_downloads -maxdepth 1 -type f \( -name "*.mp4" -o -name "*.webm" -o -name "*.mkv" -o -name "*.avi" \) | head -1)
                 [ -n "$DOWNLOADED_FILE" ] || return 1
 
-                # Playlist mode: one method run produces MANY files, and the
-                # retry/stash path below is single-file (it inspects head -1 and
-                # deletes every video on failure). Re-running a whole 40-video
-                # playlist because item #3 came out 720p would waste hours and
-                # throw away the 39 good files, so we accept whatever the run
-                # produced and let --ignore-errors handle per-item failures.
+                # Playlist mode: the retry/stash path below is single-file (head -1,
+                # and it deletes every video on failure), so one low-res item would
+                # re-download the whole playlist and discard the good files. Accept
+                # the run; --ignore-errors handles per-item failures.
                 if [ "$PLAYLIST" = "true" ]; then
-                  echo "Playlist mode: keeping $(find tmp_downloads -maxdepth 1 -type f | wc -l) file(s) without per-item quality retry"
+                  echo "Playlist mode: keeping downloaded file(s), no per-item quality retry"
                   return 0
                 fi
 
