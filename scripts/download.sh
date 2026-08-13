@@ -98,8 +98,16 @@ run_ytdlp() {
 # Car-stereo MP3 profile: car head units reject VBR LAME (yt-dlp's
 # default --audio-quality 0), reject 48 kHz, and ignore ID3v2.4 tags.
 # Force 320k CBR / 44.1 kHz / ID3v2.3 on the ExtractAudio ffmpeg call.
+# The postprocessor key MUST be lowercase: yt-dlp lowercases keys when matching,
+# so "ExtractAudio:" silently never matches and the args are dropped with no
+# warning — the log still shows "[ExtractAudio] Destination: ....mp3" while
+# ffmpeg falls back to its default ~128k VBR. Verified: "ExtractAudio:" -> 64k,
+# "extractaudio:" -> 320k.
+#
+# Do NOT add --audio-quality here: it emits its own -q:a, which lands BEFORE
+# these args and yields a low VBR bitrate (0 -> ~76k).
 MP3_CAR=(
-  --postprocessor-args "ExtractAudio:-c:a libmp3lame -b:a 320k -ar 44100 -map_metadata 0 -id3v2_version 3"
+  --postprocessor-args "extractaudio:-c:a libmp3lame -b:a 320k -ar 44100 -map_metadata 0 -id3v2_version 3"
   --embed-metadata
 )
 
