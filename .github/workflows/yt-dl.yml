@@ -12,6 +12,16 @@ on:
         required: false
         default: "best"
         type: string
+      playlist:
+        description: "Download the whole playlist/channel when the URL points to one"
+        required: false
+        default: false
+        type: boolean
+      playlist_items:
+        description: "Playlist range/selection, e.g. 1-20 or 1,5,8 (blank = all)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   download-youtube:
@@ -125,6 +135,25 @@ jobs:
         run: |
           YOUTUBE_URLS="${{ github.event.inputs.youtube_urls }}"
           QUALITY="${{ github.event.inputs.quality }}"
+          PLAYLIST="${{ github.event.inputs.playlist }}"
+          PLAYLIST_ITEMS="${{ github.event.inputs.playlist_items }}"
+
+          # Playlist mode. By default every yt-dlp call passes --no-playlist so a
+          # watch?v=...&list=... URL only grabs the single video. With the playlist
+          # input on we pass --yes-playlist instead, prefix filenames with the
+          # playlist index so the car/USB stick plays them in order, and let
+          # --playlist-items narrow the range (e.g. "1-20").
+          #
+          # PL_FLAGS is expanded unquoted at the call sites, so keep it as an array.
+          if [ "$PLAYLIST" = "true" ]; then
+            PL_FLAGS=(--yes-playlist --ignore-errors)
+            [ -n "$PLAYLIST_ITEMS" ] && PL_FLAGS+=(--playlist-items "$PLAYLIST_ITEMS")
+            OUT_TMPL="tmp_downloads/%(playlist_index)s - %(title)s.%(ext)s"
+            echo "Playlist mode ON (items: ${PLAYLIST_ITEMS:-all})"
+          else
+            PL_FLAGS=(--no-playlist)
+            OUT_TMPL="tmp_downloads/%(title)s.%(ext)s"
+          fi
 
           SPLIT_MB=45
           SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
@@ -183,6 +212,22 @@ jobs:
             fi
           }
 
+          # Car-stereo MP3 profile. Head units (especially older/USB ones) choke on
+          # VBR LAME and on ID3v2.4 tags, so instead of yt-dlp's default
+          # "--audio-quality 0" (VBR V0) we force exactly the ffmpeg recipe that is
+          # known to play in the car:
+          #   ffmpeg -i in.m4a -c:a libmp3lame -b:a 320k -ar 44100 \
+          #          -map_metadata 0 -id3v2_version 3 out.mp3
+          #   * libmp3lame @ 320k CBR  — constant bitrate, universally seekable
+          #   * -ar 44100              — CD sample rate; some units reject 48 kHz MP3
+          #   * -map_metadata 0        — carry title/artist over from the source
+          #   * -id3v2_version 3       — ID3v2.3, not the 2.4 default many units ignore
+          # These are passed to the ExtractAudio post-processor's ffmpeg call.
+          MP3_CAR=(
+            --postprocessor-args "ExtractAudio:-c:a libmp3lame -b:a 320k -ar 44100 -map_metadata 0 -id3v2_version 3"
+            --embed-metadata
+          )
+
           download_audio() {
             local METHOD=$1
             echo "Trying audio method $METHOD..."
@@ -192,9 +237,9 @@ jobs:
                 run_ytdlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   -f "bestaudio[ext=m4a]/bestaudio" \
-                  --extract-audio --audio-format mp3 --audio-quality 0 \
-                  --output "tmp_downloads/%(title)s.%(ext)s" \
-                  --no-playlist --retries 10 --fragment-retries 20 \
+                  --extract-audio --audio-format mp3 "${MP3_CAR[@]}" \
+                  --output "$OUT_TMPL" \
+                  "${PL_FLAGS[@]}" --retries 10 --fragment-retries 20 \
                   --concurrent-fragments 4 --no-check-certificates --no-warnings \
                   --throttled-rate 100K \
                   --extractor-args "youtube:player_client=web,mweb,android_vr" \
@@ -206,9 +251,9 @@ jobs:
                 run_ytdlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   -f "bestaudio[ext=m4a]/bestaudio" \
-                  --extract-audio --audio-format mp3 --audio-quality 0 \
-                  --output "tmp_downloads/%(title)s.%(ext)s" \
-                  --no-playlist --retries 10 --fragment-retries 20 \
+                  --extract-audio --audio-format mp3 "${MP3_CAR[@]}" \
+                  --output "$OUT_TMPL" \
+                  "${PL_FLAGS[@]}" --retries 10 --fragment-retries 20 \
                   --concurrent-fragments 4 --no-check-certificates --no-warnings \
                   --throttled-rate 100K \
                   --extractor-args "youtube:player_client=android_vr" \
@@ -218,9 +263,9 @@ jobs:
                 # android_vr without proxy: last-resort exit IP
                 run_ytdlp \
                   -f "bestaudio[ext=m4a]/bestaudio/bestaudio*/best" \
-                  --extract-audio --audio-format mp3 --audio-quality 0 \
-                  --output "tmp_downloads/%(title)s.%(ext)s" \
-                  --no-playlist --retries 10 --fragment-retries 20 \
+                  --extract-audio --audio-format mp3 "${MP3_CAR[@]}" \
+                  --output "$OUT_TMPL" \
+                  "${PL_FLAGS[@]}" --retries 10 --fragment-retries 20 \
                   --concurrent-fragments 1 --no-check-certificates --no-warnings \
                   --throttled-rate 100K \
                   --extractor-args "youtube:player_client=android_vr" \
@@ -248,8 +293,8 @@ jobs:
                 run_ytdlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "${FORMAT}/best" \
-                  --output "tmp_downloads/%(title)s.%(ext)s" \
-                  --no-playlist --retries 10 --fragment-retries 10 \
+                  --output "$OUT_TMPL" \
+                  "${PL_FLAGS[@]}" --retries 10 --fragment-retries 10 \
                   --concurrent-fragments 4 --no-check-certificates --no-warnings \
                   --throttled-rate 100K \
                   --extractor-args "youtube:player_client=web,mweb,android_vr" \
@@ -263,8 +308,8 @@ jobs:
                 run_ytdlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
-                  --output "tmp_downloads/%(title)s.%(ext)s" \
-                  --no-playlist --retries 10 --fragment-retries 20 \
+                  --output "$OUT_TMPL" \
+                  "${PL_FLAGS[@]}" --retries 10 --fragment-retries 20 \
                   --concurrent-fragments 4 --no-check-certificates --no-warnings \
                   --throttled-rate 100K \
                   --extractor-args "youtube:player_client=android_vr" \
@@ -276,8 +321,8 @@ jobs:
                 run_ytdlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
-                  --output "tmp_downloads/%(title)s.%(ext)s" \
-                  --no-playlist --retries 10 --fragment-retries 20 \
+                  --output "$OUT_TMPL" \
+                  "${PL_FLAGS[@]}" --retries 10 --fragment-retries 20 \
                   --concurrent-fragments 4 --no-check-certificates --no-warnings \
                   --throttled-rate 100K \
                   --extractor-args "youtube:player_client=web" \
@@ -291,8 +336,8 @@ jobs:
                 run_ytdlp \
                   --proxy "socks5://127.0.0.1:1080" \
                   --format "$FORMAT" \
-                  --output "tmp_downloads/%(title)s.%(ext)s" \
-                  --no-playlist --retries 10 --fragment-retries 20 \
+                  --output "$OUT_TMPL" \
+                  "${PL_FLAGS[@]}" --retries 10 --fragment-retries 20 \
                   --concurrent-fragments 4 --no-check-certificates --no-warnings \
                   --throttled-rate 100K \
                   --extractor-args "youtube:player_client=tv_embedded" \
@@ -302,8 +347,8 @@ jobs:
                 # android_vr WITHOUT proxy: different exit IP as last resort
                 run_ytdlp \
                   --format "$FORMAT" \
-                  --output "tmp_downloads/%(title)s.%(ext)s" \
-                  --no-playlist --retries 15 --fragment-retries 30 \
+                  --output "$OUT_TMPL" \
+                  "${PL_FLAGS[@]}" --retries 15 --fragment-retries 30 \
                   --concurrent-fragments 4 --no-check-certificates \
                   --throttled-rate 100K \
                   --http-chunk-size 10M \
@@ -314,8 +359,8 @@ jobs:
                 # web + JS solver WITHOUT proxy: different exit IP, last resort
                 run_ytdlp \
                   --format "${FORMAT}/best" \
-                  --output "tmp_downloads/%(title)s.%(ext)s" \
-                  --no-playlist --retries 10 --fragment-retries 20 \
+                  --output "$OUT_TMPL" \
+                  "${PL_FLAGS[@]}" --retries 10 --fragment-retries 20 \
                   --concurrent-fragments 4 --no-check-certificates \
                   --throttled-rate 100K \
                   --extractor-args "youtube:player_client=web" \
@@ -517,6 +562,18 @@ jobs:
                 download_video "$m" || return 1
                 DOWNLOADED_FILE=$(find tmp_downloads -maxdepth 1 -type f \( -name "*.mp4" -o -name "*.webm" -o -name "*.mkv" -o -name "*.avi" \) | head -1)
                 [ -n "$DOWNLOADED_FILE" ] || return 1
+
+                # Playlist mode: one method run produces MANY files, and the
+                # retry/stash path below is single-file (it inspects head -1 and
+                # deletes every video on failure). Re-running a whole 40-video
+                # playlist because item #3 came out 720p would waste hours and
+                # throw away the 39 good files, so we accept whatever the run
+                # produced and let --ignore-errors handle per-item failures.
+                if [ "$PLAYLIST" = "true" ]; then
+                  echo "Playlist mode: keeping $(find tmp_downloads -maxdepth 1 -type f | wc -l) file(s) without per-item quality retry"
+                  return 0
+                fi
+
                 if check_quality "$DOWNLOADED_FILE"; then
                   return 0
                 fi
