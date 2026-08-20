@@ -140,7 +140,10 @@ download_audio() {
         "$URL"
       ;;
     2)
-      # android_vr alone: clean audio-only formats, no PO token needed.
+      # tv_embedded alone: no PO token needed. Replaced android_vr, which
+      # YouTube now gates behind login — it failed extraction with "Sign in
+      # to confirm you're not a bot" on BOTH the WARP exit IP and the raw
+      # runner IP, so it was dead regardless of network path.
       # Format chain is deliberately wide: this method is the rescue path
       # when method 1 gets 403'd by throttling, so a missing m4a must fall
       # through to any audio (or a muxed best) rather than aborting with
@@ -153,11 +156,11 @@ download_audio() {
         "${PL_FLAGS[@]}" --retries 10 --fragment-retries 20 \
         --concurrent-fragments 4 --no-check-certificates --no-warnings \
         --throttled-rate 100K \
-        --extractor-args "youtube:player_client=android_vr" \
+        --extractor-args "youtube:player_client=tv_embedded" \
         "$URL"
       ;;
     3)
-      # android_vr without proxy: last-resort exit IP
+      # tv_embedded without proxy: last-resort exit IP
       run_ytdlp \
         -f "bestaudio[ext=m4a]/bestaudio/bestaudio*/best" \
         --extract-audio --audio-format mp3 "${MP3_CAR[@]}" \
@@ -165,7 +168,7 @@ download_audio() {
         "${PL_FLAGS[@]}" --retries 10 --fragment-retries 20 \
         --concurrent-fragments 1 --no-check-certificates --no-warnings \
         --throttled-rate 100K \
-        --extractor-args "youtube:player_client=android_vr" \
+        --extractor-args "youtube:player_client=tv_embedded" \
         "$URL"
       ;;
   esac
