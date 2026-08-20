@@ -36,7 +36,17 @@ if [ "$PLAYLIST" = "true" ]; then
   OUT_TMPL="tmp_downloads/%(playlist_index)s - %(title)s.%(ext)s"
   echo "Playlist mode ON (items: $PLAYLIST_ITEMS)"
 else
-  PL_FLAGS=(--no-playlist)
+  # Single URLs need the same throttle resistance as playlists. A flagged
+  # WARP exit IP gets 403s at the data-fetch stage even for one video —
+  # extraction succeeds, then format 140 is refused. --retry-sleep rides
+  # out the backoff instead of giving up after yt-dlp's short default
+  # retries. No --yes-playlist here: this is rate limiting, not playlist
+  # behaviour, so --no-playlist still applies.
+  PL_FLAGS=(
+    --no-playlist
+    --sleep-requests 1.5
+    --retry-sleep "http:exp=5:120"
+  )
   OUT_TMPL="tmp_downloads/%(title)s.%(ext)s"
 fi
 
@@ -130,10 +140,14 @@ download_audio() {
         "$URL"
       ;;
     2)
-      # android_vr alone: clean audio-only formats, no PO token needed
+      # android_vr alone: clean audio-only formats, no PO token needed.
+      # Format chain is deliberately wide: this method is the rescue path
+      # when method 1 gets 403'd by throttling, so a missing m4a must fall
+      # through to any audio (or a muxed best) rather than aborting with
+      # "Requested format is not available" before downloading anything.
       run_ytdlp \
         --proxy "socks5://127.0.0.1:1080" \
-        -f "bestaudio[ext=m4a]/bestaudio" \
+        -f "bestaudio[ext=m4a]/bestaudio/bestaudio*/best" \
         --extract-audio --audio-format mp3 "${MP3_CAR[@]}" \
         --output "$OUT_TMPL" \
         "${PL_FLAGS[@]}" --retries 10 --fragment-retries 20 \
