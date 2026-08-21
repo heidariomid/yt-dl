@@ -18,9 +18,9 @@ on:
         default: ""
         type: string
       use_warp:
-        description: "Route traffic through Cloudflare WARP"
+        description: "Route traffic through Cloudflare WARP (off by default — the shared exit IPs are usually already rate-limited by Behance)"
         required: false
-        default: true
+        default: false
         type: boolean
 
 jobs:
@@ -56,7 +56,10 @@ jobs:
             caomingjun/warp
           sleep 25
 
-          # Behance blocks some datacenter ranges; WARP gives a residential-ish exit.
+          # WARP was meant to dodge Behance's datacenter blocks, but its exit IPs
+          # are shared across every runner using the same Cloudflare pool, so runs
+          # tend to inherit an already-exhausted request quota and 429 on the very
+          # first gallery. Left available behind the flag, but off by default.
           # NOTE: do NOT export HTTP_PROXY/HTTPS_PROXY/ALL_PROXY via $GITHUB_ENV.
           # They would apply to every later step, and actions/checkout's Node
           # runtime rejects a socks5:// proxy URL ("Invalid URL protocol"),
