@@ -31,6 +31,12 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 ROOT = "https://www.behance.net"
 
+# Retry pacing for Behance's rate limiter. It blocks for minutes, so the
+# backoff has to outlast a block rather than expire inside it: 5s doubling
+# to a 120s cap spans ~4 minutes across the default 6 attempts.
+BACKOFF_BASE = 5
+BACKOFF_CAP = 120
+
 _cj = http.cookiejar.CookieJar()
 _opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_cj))
 _opener.addheaders = [
@@ -95,28 +101,54 @@ def _set_challenge(token):
         False, None, None, {}))
 
 
-def fetch(url, tries=4):
-    """GET a URL, transparently solving the JS cookie challenge."""
+def fetch(url, tries=6):
+    """GET a URL, transparently solving the JS cookie challenge.
+
+    Backoff is exponential and honours Retry-After. Behance rate-limits for
+    minutes at a time, and WARP exit IPs are shared across every runner using
+    the same Cloudflare pool, so inherited 429 state is common and a short
+    linear backoff just burns every attempt inside one block window.
+    """
     last = None
-    for attempt in range(tries):
+    challenges = 0
+    attempt = 0
+    while attempt < tries:
         try:
             with _opener.open(url, timeout=60) as r:
                 return r.read().decode("utf-8", "ignore")
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", "ignore")
             m = re.search(r"js_challenge_value=([a-f0-9]+)", body)
-            if e.code == 403 and m:
+            if e.code == 403 and m and challenges < 3:
                 # Varnish handed us the challenge token; set it and retry.
+                # Solving a challenge is not a failed attempt, so it gets its
+                # own budget rather than consuming a 429 retry.
                 _set_challenge(m.group(1))
+                challenges += 1
                 continue
             last = e
             if e.code in (429, 500, 502, 503, 504):
-                time.sleep(3 * (attempt + 1))
+                delay = min(BACKOFF_CAP, BACKOFF_BASE * (2 ** attempt))
+                ra = e.headers.get("Retry-After") if e.headers else None
+                if ra:
+                    try:
+                        delay = max(delay, min(BACKOFF_CAP, int(ra)))
+                    except ValueError:
+                        pass
+                attempt += 1
+                if attempt >= tries:
+                    break
+                log(f"  … HTTP {e.code}; waiting {delay}s "
+                    f"(attempt {attempt}/{tries})")
+                time.sleep(delay)
                 continue
             raise
         except urllib.error.URLError as e:
             last = e
-            time.sleep(3 * (attempt + 1))
+            attempt += 1
+            if attempt >= tries:
+                break
+            time.sleep(min(BACKOFF_CAP, BACKOFF_BASE * (2 ** attempt)))
     raise last or RuntimeError(f"failed to fetch {url}")
 
 
@@ -397,7 +429,7 @@ def main():
                 ok, fail = do_gallery(gid, args.output)
                 total_ok += ok
                 total_fail += fail
-                time.sleep(2)  # be polite; Behance rate-limits bursts
+                time.sleep(5)  # be polite; Behance rate-limits bursts
         else:
             log(f"> gallery: {ident}" + (f" module {module_id}" if module_id else ""))
             ok, fail = do_gallery(ident, args.output, module_id)
