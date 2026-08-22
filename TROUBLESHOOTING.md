@@ -1,4 +1,4 @@
-# YouTube Downloader — Troubleshooting & Decision Guide
+# YouTube Downloaders — Troubleshooting & Decision Guide
 
 > Read this **first** when a `.github/workflows/*.yml` downloader breaks or behaves oddly. It records what we tried, what worked, what didn't, and _why_ — so we don't re-walk the whole path. `yt-dl.yml` is the proven reference implementation; everything here is about keeping it (and its siblings) working.
 
