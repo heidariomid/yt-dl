@@ -78,7 +78,9 @@ jobs:
         run: |
           sudo apt-get install -y -qq zip
           # urllib cannot speak SOCKS on its own; PySocks patches the socket layer.
-          python3 -m pip install --user -q PySocks
+          # curl_cffi impersonates Firefox's TLS fingerprint — Varnish 429s
+          # CPython's default JA3 from GitHub Actions IPs on the first request.
+          python3 -m pip install --user -q PySocks 'curl_cffi>=0.7'
           python3 --version
 
       - name: Restore Behance cookies (optional)
