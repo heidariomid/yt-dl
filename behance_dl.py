@@ -48,19 +48,19 @@ GRAPHQL = ROOT + "/v3/graphql"
 BCP_DEFAULT = "4c34489d-914c-46cd-b44c-dfd0e661136d"
 
 # gallery-dl's default session cookies — Varnish 403s gallery pages without them.
+# Keep this tiny: a full Adobe cookie export (iat0 JWT + AMCV_* + gki) blows
+# past Varnish's header budget and comes back as HTTP 431.
 BROWSER_COOKIES = {
     "bcp": BCP_DEFAULT,
     "ilo0": "true",
     "gk_suid": "14118261",
-    "gki": (
-        "feature_3_in_1_checkout_test:false,"
-        "hire_browse_get_quote_cta_ab_test:false,"
-        "feature_hire_dashboard_services_ab_test:false,"
-        "feature_show_details_jobs_row_ab_test:false,"
-        "feature_ai_freelance_project_create_flow:false,"
-    ),
-    "originalReferrer": "",
 }
+
+COOKIE_KEEP = {
+    "sso_sid", "sso_uid", "iat0", "adobe_sso", "bcp-sid", "sid", "user_sid",
+    "bcp", "ilo0", "js_challenge_value", "gk_suid",
+}
+COOKIE_BUDGET = 6 * 1024  # bytes; Adobe/Varnish 431s around 8 KB of headers
 
 # 429 windows on datacenter IPs last minutes. 15s doubling to 180s across
 # 10 attempts is ~20 minutes and still honours a longer Retry-After.
@@ -235,6 +235,50 @@ def _seed_browser_cookies():
             _add_cookie(name, value)
 
 
+def _drop_cookie(name):
+    for c in list(_cj):
+        if c.name == name:
+            _cj.clear(c.domain, c.path, c.name)
+
+
+def _refresh_cf_cookies():
+    if _cf_session is None:
+        return
+    try:
+        _cf_session.cookies.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    for c in _cj:
+        _cf_session.cookies.set(c.name, c.value, domain=c.domain or ".behance.net")
+
+
+def _trim_cookies(aggressive=False):
+    """Drop tracking cookies so the Cookie header stays under Varnish's limit."""
+    keep = set(COOKIE_KEEP)
+    if aggressive:
+        keep = {"sso_sid", "sso_uid", "iat0", "bcp", "ilo0", "js_challenge_value"}
+    dropped = []
+    for c in list(_cj):
+        if c.name not in keep:
+            dropped.append(c.name)
+            _drop_cookie(c.name)
+    header = _cookie_header()
+    if len(header) > COOKIE_BUDGET:
+        protected = {"js_challenge_value", "bcp", "ilo0", "sso_sid"}
+        for c in sorted(_cj, key=lambda x: len(x.value or ""), reverse=True):
+            if c.name in protected:
+                continue
+            dropped.append(c.name)
+            _drop_cookie(c.name)
+            if len(_cookie_header()) <= COOKIE_BUDGET:
+                break
+    _refresh_cf_cookies()
+    if dropped:
+        log(f"  trimmed {len(dropped)} cookie(s) ({', '.join(dropped)}); "
+            f"header now {len(_cookie_header())} B")
+    return bool(dropped)
+
+
 def _write_cookie_file():
     """Netscape cookie file for curl -b/-c."""
     global _cookie_file
@@ -270,6 +314,7 @@ def _init_http():
     """Pick an HTTP backend and seed the browser cookies Varnish expects."""
     global _http_backend, _cf_session, _cf_impersonate, _opener
     _seed_browser_cookies()
+    _trim_cookies()
 
     try:
         from curl_cffi import requests as cf
@@ -301,15 +346,19 @@ def _init_http():
 
 
 def _sync_cf_cookies():
+    """Keep only allowlisted cookies from the response — tracking Set-Cookie
+    values are what push a later request over the 431 header limit."""
     if _cf_session is None:
         return
+    items = []
     try:
-        for c in _cf_session.cookies.jar:
-            domain = getattr(c, "domain", None) or ".behance.net"
-            _add_cookie(c.name, c.value, domain)
+        items = [(c.name, c.value, getattr(c, "domain", None) or ".behance.net")
+                 for c in _cf_session.cookies.jar]
     except Exception:  # noqa: BLE001
-        for name, value in _cf_session.cookies.items():
-            _add_cookie(name, value)
+        items = [(n, v, ".behance.net") for n, v in _cf_session.cookies.items()]
+    for name, value, domain in items:
+        if name in COOKIE_KEEP:
+            _add_cookie(name, value, domain)
 
 
 def _header_map(raw_headers):
@@ -331,12 +380,34 @@ def _raw_request(method, url, data=None, extra_headers=None):
     return _urllib_request(method, url, data, extra_headers)
 
 
+def _cf_extras(kind):
+    """Headers curl_cffi should add on top of the Firefox impersonation set.
+
+    Impersonate already sends UA/Accept/Sec-Fetch/Cookie. Duplicating those
+    plus a 21-cookie Adobe dump is what produced HTTP 431.
+    """
+    if kind == "gql":
+        return (
+            ("Origin", ROOT),
+            ("Referer", ROOT + "/"),
+            ("X-Requested-With", "XMLHttpRequest"),
+            ("Content-Type", "application/json"),
+            ("X-BCP", _bcp()),
+        )
+    return (("Referer", ROOT + "/"),)
+
+
 def _cf_request(method, url, data, extra_headers):
     global _cf_impersonate
-    headers = {k: v for k, v in (extra_headers or HTML_HEADERS) if v}
-    headers["Cookie"] = _cookie_header()
+    # Never send Cookie here — the session jar already has it. A second
+    # Cookie header doubles the size and Varnish answers 431.
+    skip = {"cookie", "user-agent", "accept", "accept-language",
+            "accept-encoding", "sec-fetch-dest", "sec-fetch-mode",
+            "sec-fetch-site", "connection", "te"}
+    headers = {k: v for k, v in (extra_headers or ()) if v
+               and k.lower() not in skip}
     if url.startswith(GRAPHQL):
-        headers["X-BCP"] = _bcp()
+        headers.setdefault("X-BCP", _bcp())
     kwargs = {"headers": headers, "timeout": 60}
     if data is not None:
         kwargs["data"] = data
@@ -388,10 +459,7 @@ def _curl_request(method, url, data, extra_headers):
     headers = list(extra_headers or HTML_HEADERS)
     if url.startswith(GRAPHQL):
         headers = list(headers) + [("X-BCP", _bcp())]
-    cookie = _cookie_header()
-    if cookie:
-        headers = [(k, v) for k, v in headers if k.lower() != "cookie"]
-        headers.append(("Cookie", cookie))
+    headers = [(k, v) for k, v in headers if k.lower() != "cookie"]
     for k, v in headers:
         if v:
             cmd += ["-H", f"{k}: {v}"]
@@ -491,6 +559,12 @@ def _request(method, url, data=None, extra_headers=None, tries=DEFAULT_TRIES):
                 continue
         if 200 <= code < 300:
             return code, headers, body
+        if code == 431:
+            last = RuntimeError("HTTP 431: request headers too large")
+            if _trim_cookies(aggressive=True):
+                log("  … HTTP 431 (headers too large); trimmed cookies, retrying")
+                continue
+            raise last
         last = RuntimeError(f"HTTP {code}: {text[:160]}")
         if code in (429, 500, 502, 503, 504):
             delay = _retry_delay(attempt, headers)
@@ -506,23 +580,30 @@ def _request(method, url, data=None, extra_headers=None, tries=DEFAULT_TRIES):
     raise last or RuntimeError(f"failed to fetch {url}")
 
 
+def _headers_for(kind):
+    if _http_backend == "curl_cffi":
+        return _cf_extras(kind)
+    return GQL_HEADERS if kind == "gql" else HTML_HEADERS
+
+
 def fetch(url, tries=DEFAULT_TRIES):
     """GET a URL as text, transparently solving the JS cookie challenge."""
     _code, _headers, body = _request(
-        "GET", url, extra_headers=HTML_HEADERS, tries=tries)
+        "GET", url, extra_headers=_headers_for("html"), tries=tries)
     return body.decode("utf-8", "ignore")
 
 
 def fetch_bytes(url, tries=3):
     _code, _headers, body = _request(
-        "GET", url, extra_headers=HTML_HEADERS, tries=tries)
+        "GET", url, extra_headers=_headers_for("html"), tries=tries)
     return body
 
 
 def graphql(query, variables, tries=DEFAULT_TRIES):
     payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
     _code, _headers, body = _request(
-        "POST", GRAPHQL, data=payload, extra_headers=GQL_HEADERS, tries=tries)
+        "POST", GRAPHQL, data=payload, extra_headers=_headers_for("gql"),
+        tries=tries)
     data = json.loads(body.decode("utf-8", "ignore") or "{}")
     if data.get("errors"):
         msgs = "; ".join(
@@ -600,8 +681,8 @@ def gallery_data(gid):
         if project:
             log("  … graphql returned no image URLs; falling back to HTML")
     except Exception as e:  # noqa: BLE001
-        if "HTTP 429" in str(e):
-            # Same Varnish bucket on this IP — HTML will 429 too.
+        if "HTTP 429" in str(e) or "HTTP 431" in str(e):
+            # 429: same IP bucket. 431: headers already trimmed; HTML won't help.
             raise
         log(f"  … graphql unavailable ({e}); falling back to HTML")
 
@@ -890,6 +971,8 @@ def main():
             log("! warning: cookies loaded but no Behance session cookie found; "
                 "mature galleries will still be skipped. Export cookies for "
                 "behance.net while logged in.")
+        log(f"Cookie header {len(_cookie_header())} B across "
+            f"{sum(1 for _ in _cj)} cookie(s)")
 
     _init_http()
     _prime_session()

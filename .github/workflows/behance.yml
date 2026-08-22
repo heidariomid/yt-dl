@@ -18,9 +18,9 @@ on:
         default: ""
         type: string
       use_warp:
-        description: "Route traffic through Cloudflare WARP (off by default — the shared exit IPs are usually already rate-limited by Behance)"
+        description: "Route traffic through Cloudflare WARP"
         required: false
-        default: false
+        default: true
         type: boolean
 
 jobs:
@@ -47,32 +47,41 @@ jobs:
       - name: Start WARP
         if: ${{ inputs.use_warp }}
         run: |
+          # Same container flags as yt-dl.yml — without src_valid_mark the
+          # WARP image fails to start on GitHub-hosted runners.
+          # Probe cloudflare.com/cdn-cgi/trace (not behance.net): Behance
+          # 403/429 on a half-ready proxy made the old health check fail.
+          # NOTE: do NOT export HTTP_PROXY/HTTPS_PROXY/ALL_PROXY via $GITHUB_ENV.
+          # actions/checkout's Node runtime rejects socks5:// ("Invalid URL
+          # protocol") and crashes post-job cleanup. Scope it to Download only.
           docker network create warp-net || true
           docker run -d \
             --name warp \
+            --restart=always \
             --network warp-net \
             -p 1080:1080 \
             --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
             caomingjun/warp
-          sleep 25
+          sleep 30
 
-          # WARP was meant to dodge Behance's datacenter blocks, but its exit IPs
-          # are shared across every runner using the same Cloudflare pool, so runs
-          # tend to inherit an already-exhausted request quota and 429 on the very
-          # first gallery. Left available behind the flag, but off by default.
-          # NOTE: do NOT export HTTP_PROXY/HTTPS_PROXY/ALL_PROXY via $GITHUB_ENV.
-          # They would apply to every later step, and actions/checkout's Node
-          # runtime rejects a socks5:// proxy URL ("Invalid URL protocol"),
-          # crashing post-job cleanup. Keep it scoped to the download step only.
-          for i in 1 2 3 4 5 6; do
-            if curl -s --socks5-hostname 127.0.0.1:1080 -m 15 https://www.behance.net -o /dev/null; then
-              echo "WARP proxy is up"
+          for i in {1..10}; do
+            RESULT=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 \
+              https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo failed)
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "WARP is active"
+              echo "$RESULT"
               echo "WARP_PROXY=socks5h://127.0.0.1:1080" >> $GITHUB_ENV
-              break
+              exit 0
             fi
             echo "waiting for WARP ($i)…"
             sleep 10
           done
+          echo "::error::WARP did not become ready"
+          docker logs warp || true
+          exit 1
 
       - name: Setup tools
         run: |
