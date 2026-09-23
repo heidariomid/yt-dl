@@ -2,13 +2,14 @@
 # Extracted from .github/workflows/yt-dl.yml.
 # Lives here because GitHub caps a run: block at 21000 chars.
 # Inputs arrive as env vars: YOUTUBE_URLS QUALITY PLAYLIST PLAYLIST_ITEMS
-#                            REPO_OWNER REPO_NAME
+#                            MP4 REPO_OWNER REPO_NAME
 set -uo pipefail
 
 YOUTUBE_URLS="${YOUTUBE_URLS:?YOUTUBE_URLS is required}"
 QUALITY="${QUALITY:-best}"
 PLAYLIST="${PLAYLIST:-false}"
 PLAYLIST_ITEMS="${PLAYLIST_ITEMS:-}"
+MP4="${MP4:-false}"
 REPO_OWNER="${REPO_OWNER:?REPO_OWNER is required}"
 REPO_NAME="${REPO_NAME:?REPO_NAME is required}"
 
@@ -94,6 +95,21 @@ case "$QUALITY" in
   "480")   FORMAT="bv*[height<=480]+ba/b[height<=480]";                    SORT="res:480,fps,vcodec,br" ;;
   *)       FORMAT="bv*+ba/b";                                              SORT="res,fps,vcodec,br" ;;
 esac
+
+# Car stereos play H.264 + AAC in an MP4, and they reject 48 kHz audio.
+# YouTube's "best" ladder is AV1 + Opus WebM, so when the checkbox is on
+# prefer the avc1 + AAC streams YouTube already has (a remux, not a
+# re-encode). Anything that still comes back as VP9/AV1/Opus is transcoded
+# after download. Audio-only stays on the car MP3 path.
+if [ "$MP4" = "true" ] && [ "$IS_AUDIO" = false ]; then
+  case "$QUALITY" in
+    "1080") FORMAT="bv*[height<=1080][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=1080]+ba/b[height<=1080]" ;;
+    "720")  FORMAT="bv*[height<=720][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=720]+ba/b[height<=720]" ;;
+    "480")  FORMAT="bv*[height<=480][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=480]+ba/b[height<=480]" ;;
+    *)      FORMAT="bv*[vcodec^=avc1]+ba[acodec^=mp4a]/bv*+ba/b" ;;
+  esac
+  echo "Car MP4 on: prefer H.264 + AAC, then convert leftovers to 44.1 kHz"
+fi
 
 # Apply the resolution-first sort (SORT, set with FORMAT above) to every
 # invocation so all methods pick the tallest surviving stream under SABR.
@@ -352,6 +368,61 @@ maybe_update_ytdlp() {
   return 1
 }
 
+# Rewrite a downloaded video into the car recipe: H.264 (8-bit) + AAC-LC
+# at 44.1 kHz, stereo, MP4 with the moov atom up front. Copies streams
+# that already match so a native avc1+AAC download is only remuxed.
+# On success the playable file is ${src%.*}.mp4. On failure the source
+# is left in place.
+car_mp4() {
+  local src="$1"
+  local vcodec acodec rate pix channels dest tmp
+  vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$src" | head -1)
+  acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$src" | head -1)
+  rate=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$src" | head -1)
+  pix=$(ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$src" | head -1)
+  channels=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of csv=p=0 "$src" | head -1)
+
+  dest="${src%.*}.mp4"
+  tmp="${src%.*}.car-tmp.mp4"
+
+  local v_copy=false a_copy=false
+  [ "$vcodec" = "h264" ] && [ "$pix" = "yuv420p" ] && v_copy=true
+  # Mono or stereo AAC at 44.1 kHz can be copied. Surround gets downmixed.
+  if [ "$acodec" = "aac" ] && [ "$rate" = "44100" ] && { [ "$channels" = "1" ] || [ "$channels" = "2" ]; }; then
+    a_copy=true
+  fi
+
+  if [ "$v_copy" = true ] && [ "$a_copy" = true ] && [ "$src" = "$dest" ]; then
+    echo "Car MP4: $(basename "$src") already H.264 + AAC 44.1 kHz"
+    return 0
+  fi
+
+  local -a v_args a_args
+  if [ "$v_copy" = true ] && [ "$a_copy" = true ]; then
+    echo "Car MP4: remuxing $(basename "$src") to MP4"
+    v_args=(-c:v copy)
+    a_args=(-c:a copy)
+  elif [ "$v_copy" = true ]; then
+    echo "Car MP4: keeping H.264, resampling audio ${rate:-?}Hz ${acodec:-?} → AAC 44.1 kHz — $(basename "$src")"
+    v_args=(-c:v copy)
+    a_args=(-c:a aac -ar 44100 -ac 2 -b:a 192k)
+  else
+    echo "Car MP4: transcoding ${vcodec:-unknown} + ${acodec:-unknown} ${rate:-?}Hz → H.264 + AAC 44.1 kHz — $(basename "$src")"
+    v_args=(-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p)
+    a_args=(-c:a aac -ar 44100 -ac 2 -b:a 192k)
+  fi
+
+  if ! ffmpeg -y -hide_banner -i "$src" -map 0:v:0 -map "0:a:0?" -sn -dn \
+      "${v_args[@]}" "${a_args[@]}" -movflags +faststart "$tmp"; then
+    echo "Car MP4 conversion failed — keeping $(basename "$src")"
+    rm -f "$tmp"
+    return 1
+  fi
+
+  rm -f "$src"
+  mv "$tmp" "$dest"
+}
+
 check_quality() {
   local FILE="$1"
   # Audio has no height to check.
@@ -537,10 +608,21 @@ for URL in "${URL_ARRAY[@]}"; do
 
   for FILE in tmp_downloads/*; do
     [ -f "$FILE" ] || continue
+
+    if [ "$MP4" = "true" ] && [ "$IS_AUDIO" = false ]; then
+      if car_mp4 "$FILE"; then
+        FILE="${FILE%.*}.mp4"
+      fi
+    fi
+
     SIZE=$(stat -c%s "$FILE")
     BASENAME=$(basename "$FILE")
     FILENAME_NO_EXT="${BASENAME%.*}"
     EXT="${BASENAME##*.}"
+    README_QUALITY="$QUALITY"
+    if [ "$MP4" = "true" ] && [ "$EXT" = "mp4" ] && [ "$IS_AUDIO" = false ]; then
+      README_QUALITY="${QUALITY} · H.264 + AAC 44.1 kHz"
+    fi
 
     FINAL_FOLDER_NAME=$(get_unique_folder "$DEST_FOLDER" "$FILENAME_NO_EXT")
     mkdir -p "$BACKUP_DIR/${FINAL_FOLDER_NAME}"
@@ -588,7 +670,7 @@ for URL in "${URL_ARRAY[@]}"; do
 
       write_readme "$README_FILE" "$FILENAME_NO_EXT" "$URL" \
         "**${PART_COUNT} zip parts** - **${TOTAL_SIZE_MB} MB**" \
-        "$QUALITY" "$DOWNLOAD_LINKS_MD" "split"
+        "$README_QUALITY" "$DOWNLOAD_LINKS_MD" "split"
 
     else
       cp "$FILE" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.${EXT}"
@@ -600,7 +682,7 @@ for URL in "${URL_ARRAY[@]}"; do
 
       write_readme "$README_FILE" "$FILENAME_NO_EXT" "$URL" \
         "**1 file** (no split) - **${SIZE_MB} MB**" \
-        "$QUALITY" "$LINKS_MD" "plain"
+        "$README_QUALITY" "$LINKS_MD" "plain"
     fi
   done
 
