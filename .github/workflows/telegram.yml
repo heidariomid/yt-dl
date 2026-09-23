@@ -1,0 +1,269 @@
+name: Telegram Downloader
+run-name: "Telegram → ${{ inputs.telegram_urls }}"
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_urls:
+        description: "Telegram message URL(s) — t.me/c/CHAT/TOPIC/MSG or t.me/user/MSG. Space/comma/newline separated."
+        required: true
+        type: string
+      password:
+        description: "Password for zip files (optional)"
+        required: false
+        default: ""
+        type: string
+      use_warp:
+        description: "Route Telethon through Cloudflare WARP (SOCKS5)"
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  download-telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Configure Git
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global core.compression 0
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+      - name: Require Telegram secrets
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+        run: |
+          missing=0
+          for name in TG_API_ID TG_API_HASH TG_SESSION; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name repo secret is not set"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Private t.me/c/ links need a member session."
+            echo "1. Create an app at https://my.telegram.org → API development tools"
+            echo "2. Add TG_API_ID and TG_API_HASH as repo secrets"
+            echo "3. On your machine: pip3 install telethon && python3 scripts/telegram_session.py"
+            echo "4. Add the printed string as TG_SESSION"
+            exit 1
+          fi
+
+      - name: Start WARP
+        if: ${{ inputs.use_warp }}
+        run: |
+          docker network create warp-net || true
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+          sleep 30
+
+          for i in {1..10}; do
+            RESULT=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 \
+              https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo failed)
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "WARP is active"
+              echo "$RESULT"
+              echo "TG_PROXY=socks5://127.0.0.1:1080" >> $GITHUB_ENV
+              exit 0
+            fi
+            echo "waiting for WARP ($i)…"
+            sleep 10
+          done
+          echo "::error::WARP did not become ready"
+          docker logs warp || true
+          exit 1
+
+      - name: Setup tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zip
+          python3 -m pip install --user -q 'telethon>=1.36' cryptg 'python-socks[asyncio]'
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          python3 --version
+
+      - name: Download Telegram media
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+        run: |
+          set -o pipefail
+          mkdir -p tmp_telegram
+          python3 scripts/telegram_dl.py \
+            -o tmp_telegram \
+            "${{ github.event.inputs.telegram_urls }}" 2>&1 | tee /tmp/dl.log
+
+          COUNT=$(find tmp_telegram -type f ! -name 'source.txt' ! -name 'caption.txt' | wc -l)
+          TEXT_ONLY=$(find tmp_telegram -name caption.txt | wc -l)
+          echo "Downloaded $COUNT media file(s), $TEXT_ONLY caption(s)"
+          if [ "$COUNT" -eq 0 ] && [ "$TEXT_ONLY" -eq 0 ]; then
+            echo "::error::Nothing downloaded — see the log above."
+            exit 1
+          fi
+
+      - name: Package (split >45MB)
+        run: |
+          SPLIT_MB=45
+          SPLIT_BYTES=$((SPLIT_MB * 1024 * 1024))
+          ZIP_PASSWORD="${{ github.event.inputs.password }}"
+
+          BACKUP_DIR="/tmp/telegram_backup"
+          rm -rf "$BACKUP_DIR"; mkdir -p "$BACKUP_DIR"
+          echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
+          echo "videos" > /tmp/dest_folder.txt
+
+          for dir in tmp_telegram/*/; do
+            [ -d "$dir" ] || continue
+            NAME=$(basename "$dir")
+            SAFE=$(echo "$NAME" | tr -cd '[:alnum:] ._-' | tr ' ' '_')
+            mkdir -p "$BACKUP_DIR/$SAFE"
+
+            SOURCE=$(cat "$dir/source.txt" 2>/dev/null || echo "")
+
+            TOTAL=$(du -sb "$dir" | cut -f1)
+
+            if [ "$TOTAL" -gt "$SPLIT_BYTES" ] || [ -n "$ZIP_PASSWORD" ]; then
+              if [ -n "$ZIP_PASSWORD" ]; then
+                zip -0 -r -s "${SPLIT_MB}m" -P "$ZIP_PASSWORD" "/tmp/${SAFE}.zip" "$dir"
+              else
+                zip -0 -r -s "${SPLIT_MB}m" "/tmp/${SAFE}.zip" "$dir"
+              fi
+              for part in /tmp/${SAFE}.z[0-9]* /tmp/${SAFE}.zip; do
+                [ -f "$part" ] || continue
+                mv "$part" "$BACKUP_DIR/$SAFE/${SAFE}.${part##*.}"
+              done
+            else
+              cp "$dir"* "$BACKUP_DIR/$SAFE/" 2>/dev/null || true
+            fi
+
+            for f in "$BACKUP_DIR/$SAFE"/*; do
+              [ -f "$f" ] || continue
+              SZ=$(stat -c%s "$f")
+              case "$f" in *.zip|*.z[0-9]*) continue ;; esac
+              if [ "$SZ" -gt "$SPLIT_BYTES" ]; then
+                BN=$(basename "$f"); STEM="${BN%.*}"
+                zip -0 -s "${SPLIT_MB}m" -j "/tmp/${STEM}.zip" "$f"
+                rm -f "$f"
+                for part in /tmp/${STEM}.z[0-9]* /tmp/${STEM}.zip; do
+                  [ -f "$part" ] || continue
+                  mv "$part" "$BACKUP_DIR/$SAFE/${STEM}.${part##*.}"
+                done
+              fi
+            done
+
+            {
+              echo "# $NAME"
+              echo
+              echo "Source: ${SOURCE:-unknown}"
+              echo
+              echo "## Files"
+              for f in "$BACKUP_DIR/$SAFE"/*; do
+                [ -f "$f" ] || continue
+                B=$(basename "$f")
+                [ "$B" = "README.md" ] && continue
+                echo "- [$B](./$(echo "$B" | sed 's/ /%20/g'))"
+              done
+              echo
+              echo "> Multi-part zips: download every \`.z01\`…\`.zip\` part into one folder, then extract the \`.zip\`."
+            } > "$BACKUP_DIR/$SAFE/README.md"
+          done
+
+          find "$BACKUP_DIR" -type f | head -50
+          echo "Total: $(find "$BACKUP_DIR" -type f | wc -l) file(s)"
+
+      - name: Split Push
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+
+          BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
+          DEST_FOLDER=$(cat /tmp/dest_folder.txt)
+
+          FILE_COUNT=$(find "$BACKUP_DIR" -type f 2>/dev/null | wc -l)
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "No files to push!"
+            exit 1
+          fi
+
+          git pull --rebase origin "$BRANCH" || true
+
+          mkdir -p "$DEST_FOLDER"
+          cp -r "$BACKUP_DIR"/. "$DEST_FOLDER"/
+
+          find "$DEST_FOLDER" -type f | split -l 5 - /tmp/git_batch_
+
+          BATCH_TOTAL=$(ls /tmp/git_batch_* 2>/dev/null | wc -l)
+          BATCH_NUM=0
+          FAILED_BATCHES=0
+
+          for batch in /tmp/git_batch_*; do
+            BATCH_NUM=$((BATCH_NUM + 1))
+            echo "Batch $BATCH_NUM/$BATCH_TOTAL"
+
+            git reset
+
+            while read -r FILE; do
+              git add "$FILE"
+            done < "$batch"
+
+            if git diff --cached --quiet; then
+              continue
+            fi
+
+            git commit -m "Batch $BATCH_NUM/$BATCH_TOTAL [skip ci]"
+
+            PUSHED=false
+            for i in 1 2 3 4 5; do
+              if git push origin HEAD:"$BRANCH"; then
+                PUSHED=true
+                break
+              fi
+              git pull --rebase origin "$BRANCH" || true
+              sleep $((i * 5))
+            done
+
+            if [ "$PUSHED" = false ]; then
+              echo "Batch $BATCH_NUM failed"
+              FAILED_BATCHES=$((FAILED_BATCHES + 1))
+              git reset HEAD~1 --soft || true
+            fi
+          done
+
+          if [ "$FAILED_BATCHES" -eq "$BATCH_TOTAL" ]; then
+            echo "All batches failed!"
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Telegram download" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -60 /tmp/dl.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "no log" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Stop WARP
+        if: always()
+        run: |
+          docker stop warp || true
+          docker rm warp || true
