@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       youtube_urls:
-        description: "YouTube URLs separated by comma (,)"
+        description: "Video, playlist, or channel URL (youtube.com/@name), separated by comma (,)"
         required: true
         type: string
       quality:
@@ -13,12 +13,12 @@ on:
         default: "best"
         type: string
       playlist:
-        description: "Download the whole playlist/channel when the URL points to one"
+        description: "Download the whole playlist. A channel link (@name) already does this."
         required: false
         default: false
         type: boolean
       playlist_items:
-        description: "Playlist range, e.g. 1-20 or 1,5,8 (blank = first 50)"
+        description: "Playlist or channel range, e.g. 1-20 or 1,5,8 (blank = first 50)"
         required: false
         default: ""
         type: string

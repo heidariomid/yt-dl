@@ -19,36 +19,79 @@ REPO_NAME="${REPO_NAME:?REPO_NAME is required}"
 # A blank range defaults to 1-50 rather than "everything": a YouTube
 # radio mix (RD... / RDGMEM... URLs) is an INFINITE generated station,
 # so "all" expanded to 447 items in practice and ran until timeout.
+# The same cap applies to a channel URL (@handle), which is just a long
+# playlist of uploads.
 #
 # Rate limiting is essential here. Within one playlist run yt-dlp loops
 # with no delay, so a datacenter IP gets throttled and then 403s every
 # item at the data-fetch stage (extraction still succeeds, which is why
 # the failure looks confusing). --sleep-requests spaces the API calls
 # and --min/max-sleep-interval spaces the downloads.
-if [ "$PLAYLIST" = "true" ]; then
-  [ -z "$PLAYLIST_ITEMS" ] && PLAYLIST_ITEMS="1-50" && echo "No range given — defaulting to 1-50"
-  PL_FLAGS=(
-    --yes-playlist --ignore-errors
-    --playlist-items "$PLAYLIST_ITEMS"
-    --sleep-requests 1.5
-    --min-sleep-interval 5 --max-sleep-interval 15
-    --retry-sleep "http:exp=5:120"
-  )
-  OUT_TMPL="tmp_downloads/%(playlist_index)s - %(title)s.%(ext)s"
+PLAYLIST_REQUESTED="$PLAYLIST"
+
+ensure_playlist_range() {
+  if [ -z "$PLAYLIST_ITEMS" ]; then
+    PLAYLIST_ITEMS="1-50"
+    echo "No range given — defaulting to 1-50"
+  fi
+}
+
+set_download_mode() {
+  if [ "$1" = "playlist" ]; then
+    ensure_playlist_range
+    PLAYLIST=true
+    PL_FLAGS=(
+      --yes-playlist --ignore-errors
+      --playlist-items "$PLAYLIST_ITEMS"
+      --sleep-requests 1.5
+      --min-sleep-interval 5 --max-sleep-interval 15
+      --retry-sleep "http:exp=5:120"
+    )
+    OUT_TMPL="tmp_downloads/%(playlist_index)s - %(title)s.%(ext)s"
+  else
+    # Single URLs need the same throttle resistance as playlists. A flagged
+    # WARP exit IP gets 403s at the data-fetch stage even for one video —
+    # extraction succeeds, then format 140 is refused. --retry-sleep rides
+    # out the backoff instead of giving up after yt-dlp's short default
+    # retries. No --yes-playlist here: this is rate limiting, not playlist
+    # behaviour, so --no-playlist still applies.
+    PLAYLIST=false
+    PL_FLAGS=(
+      --no-playlist
+      --sleep-requests 1.5
+      --retry-sleep "http:exp=5:120"
+    )
+    OUT_TMPL="tmp_downloads/%(title)s.%(ext)s"
+  fi
+}
+
+# A bare @handle /channel /c /user link opens the home shelf, not the
+# uploads. Point it at /videos unless the URL already names a tab.
+# Returns 0 when the URL is a channel (stdout is the URL to download).
+normalize_channel_url() {
+  local url="$1" base
+  if ! printf '%s' "$url" | grep -qiE 'youtube\.com/(@|channel/|c/|user/)'; then
+    printf '%s\n' "$url"
+    return 1
+  fi
+  if printf '%s' "$url" | grep -qiE 'youtube\.com/(@[^/?#]+|channel/[^/?#]+|c/[^/?#]+|user/[^/?#]+)/(videos|shorts|streams|playlists)([/?#]|$)'; then
+    printf '%s\n' "$url"
+    return 0
+  fi
+  if printf '%s' "$url" | grep -qiE 'youtube\.com/(@[^/?#]+|channel/[^/?#]+|c/[^/?#]+|user/[^/?#]+)/?(\?.*)?$'; then
+    base=$(printf '%s' "$url" | sed -E 's/[?#].*$//; s:/*$::')
+    printf '%s\n' "${base}/videos"
+    return 0
+  fi
+  printf '%s\n' "$url"
+  return 1
+}
+
+if [ "$PLAYLIST_REQUESTED" = "true" ]; then
+  set_download_mode playlist
   echo "Playlist mode ON (items: $PLAYLIST_ITEMS)"
 else
-  # Single URLs need the same throttle resistance as playlists. A flagged
-  # WARP exit IP gets 403s at the data-fetch stage even for one video —
-  # extraction succeeds, then format 140 is refused. --retry-sleep rides
-  # out the backoff instead of giving up after yt-dlp's short default
-  # retries. No --yes-playlist here: this is rate limiting, not playlist
-  # behaviour, so --no-playlist still applies.
-  PL_FLAGS=(
-    --no-playlist
-    --sleep-requests 1.5
-    --retry-sleep "http:exp=5:120"
-  )
-  OUT_TMPL="tmp_downloads/%(title)s.%(ext)s"
+  set_download_mode single
 fi
 
 SPLIT_MB=45
@@ -476,6 +519,21 @@ URL_INDEX=0
 for URL in "${URL_ARRAY[@]}"; do
   URL_INDEX=$((URL_INDEX + 1))
   echo "[$URL_INDEX/$URL_COUNT] $URL"
+
+  # Channel links download as a playlist even when the checkbox is off.
+  # A following single-video URL goes back to single-video mode.
+  if CHANNEL_URL=$(normalize_channel_url "$URL"); then
+    if [ "$CHANNEL_URL" != "$URL" ]; then
+      echo "Channel URL → $CHANNEL_URL"
+    fi
+    URL="$CHANNEL_URL"
+    if [ "$PLAYLIST" != "true" ]; then
+      set_download_mode playlist
+      echo "Channel detected — downloading items $PLAYLIST_ITEMS"
+    fi
+  elif [ "$PLAYLIST_REQUESTED" != "true" ]; then
+    set_download_mode single
+  fi
 
   rm -rf tmp_downloads
   mkdir -p tmp_downloads
